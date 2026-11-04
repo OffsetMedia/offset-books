@@ -1,26 +1,41 @@
-# Switching on editing (one-time, about 3 minutes)
+# Offset Books: server setup
 
-The app's editing screens call these server actions: `obwMeta`, `obwSaveEntry`, `obwDeleteEntry`, `obwSaveBill`, `obwSaveProject`, `obwSaveClient`, and for bills Claude reads, `obwUploadBill`, `obwDecideBill` and `obwBillFile`. Invoices and quotes (create, PDF, email, payments) use your existing Code.gs functions through Api.gs. They live in `AppWrite.gs`, which is self-contained: it checks the Google sign-in itself, only lets the admin write, and logs every change to the AuditLog tab. Everything else is still handled by the existing `Api.gs`.
+The app is your original Offset Books screen (from `Index.html`) running as an installable app, plus split bills, documents read by Claude, and Claude's weekly check with an in-app Inbox.
+
+Invoices, quotes, emailing, payments, the bank, vendors, crew and settings all run on your existing `Code.gs` through `Api.gs`. The new features run on `AppWrite.gs`.
+
+## Install or update (about 3 minutes)
 
 1. Open the Offset Books DB sheet, then **Extensions → Apps Script**.
-2. Click **+** next to Files, choose **Script**, and name it `AppWrite`. Paste in the whole of `AppWrite.gs` and save.
-3. Open `Api.gs` and find `function doPost(e) {`. Paste this as the first line inside it:
-   ```js
-   var w = obwHandle(e); if (w) return w;
-   ```
-   (If the brackets say something other than `e`, for example `doPost(req)`, use that name instead: `obwHandle(req)`.)
-4. Save, then go to **Deploy → Manage deployments**, click the pencil on the existing deployment, set **Version: New version**, and click **Deploy**. Editing the existing deployment keeps the same `/exec` URL, so `config.js` doesn't change. Creating a *new* deployment would give a new URL.
-5. Reopen the app and tap Refresh. The yellow "Editing is not switched on yet" banner should be gone.
+2. Open the **AppWrite** file, select everything, and paste in the whole new `AppWrite.gs`. Save.
+3. `Api.gs` needs only its first line inside `doPost(e)`, which you already have: `var w = obwHandle(e); if (w) return w;`
+4. **Deploy → Manage deployments**, click the pencil on the existing deployment, set **Version: New version**, then **Deploy**. This keeps the same `/exec` URL.
+5. Google asks you to approve new permissions: Calendar (for matching bills to shoot days) and "run when you're not there" (the weekly check). Allow both.
+6. Open the app, go to **Inbox**, and tap **Run check now** once. That runs the first check and switches on the Monday-morning weekly check.
 
-## What it writes to the DB
+## What the new parts write
 
-- **Entries**: new and edited lines. Edits change only the cells that changed. The first save adds two columns at the far right: `bill_id` (links the lines of a split bill) and `allocation` (`overhead` when you confirm a supplier cost has no project).
-- **Projects**: new projects and edits (fee, budgets, status, dates, notes).
-- **AuditLog**: one row per changed field, with the old and new value. A deleted or split line keeps its full old row in AuditLog, so it can be restored by hand.
+- **Entries**: lines from split bills and approved bills. Two columns are added on first use: `bill_id` (links the lines of one bill) and `allocation` (`overhead`).
+- **Approvals**: each document Claude reads waits here (`source` = `bill_upload`) until you approve or reject it.
+- **Inbox** (new tab): one row per check, with Claude's message and the list of issues.
+- **AIUsage**: every Claude call, with its cost. Calls are counted against `claude_monthly_budget_usd`.
+- **AuditLog**: every change, with old and new values.
+- **Drive**: bills go to `FY 2026-27/Bills in/_To review`. Approved bills are renamed `YYYY-MM-DD_Supplier_DocNo_Amount` and moved to `Bills in/<Rentals|Crew|Studios|Props|Other>/<Supplier>`. Rejected bills go to `Bills in/_Rejected`.
 
-## Bills read by Claude
+## What the weekly check looks for
 
-- Uploads go to Drive: `FY 2026-27/Bills in/_To review`. On approval the file is renamed `YYYY-MM-DD_Supplier_DocNo_Amount.pdf` and moved to `Bills in/<Rentals|Crew|Studios|Props|Other>/<Supplier>`. Rejected bills move to `Bills in/_Rejected`.
-- Claude (Haiku first, then Sonnet only when Haiku is unsure) gets the document, your projects, the last 90 project costs, the payee aliases and the shoot calendars in Settings `calendar_ids`. Each call is logged in AIUsage and counted against `claude_monthly_budget_usd`.
-- Each bill waits in the Approvals tab (`source` = `bill_upload`) until you approve or reject it. Nothing reaches Entries before then.
-- The first time you redeploy, Google asks you to allow Calendar access. Say yes.
+- Income lines pointing at a missing invoice, or at an invoice for another client
+- Invoices with no income line, or counted twice
+- Zero amounts
+- Supplier costs with no project
+- Possible duplicate costs
+- Missing supplier invoices, grouped by payee
+- Overdue invoices
+- Projects over budget
+- Withholding tax: one person paid LKR 80,000 or more in a month
+- Settings that look wrong
+- Unpaid costs older than 30 days
+- Unsorted bank lines, and a statement that is out of date
+- Items waiting for approval
+
+You can dismiss an issue so future checks skip it.

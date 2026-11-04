@@ -1,0 +1,133 @@
+/* ===== Offset Books additions and layout polish on top of legacy.css ===== */
+:root { --ease-out: cubic-bezier(0.23, 1, 0.32, 1); }
+[hidden] { display: none !important; }
+
+/* sign-in and loading */
+.ob-screen { min-height: 100vh; min-height: 100dvh; display: flex; align-items: center; justify-content: center; padding: 24px; }
+.ob-card { background: var(--night); border: 1px solid var(--border); border-radius: 20px; padding: 32px 28px; width: 100%; max-width: 380px; text-align: center; display: flex; flex-direction: column; align-items: center; gap: 12px; }
+.ob-card .logo { padding: 0; justify-content: center; }
+.ob-card h1 { font-size: 34px; }
+.ob-gbtn { min-height: 44px; display: flex; justify-content: center; margin-top: 8px; }
+.ob-msg { color: var(--pill-late); min-height: 18px; font-size: 14px; }
+.ob-spin { width: 34px; height: 34px; border: 3px solid var(--border); border-top-color: var(--magenta); border-radius: 50%; animation: obspin .7s linear infinite; margin: 10px 0; }
+@keyframes obspin { to { transform: rotate(360deg); } }
+
+/* nav: icons, badges, phone bar with More */
+nav a { position: relative; }
+.nico { width: 19px; height: 19px; flex: none; fill: none; stroke: currentColor; stroke-width: 1.7; stroke-linecap: round; stroke-linejoin: round; }
+.navbadge { margin-left: auto; background: var(--magenta); color: #fff; font: 600 11px 'Inter Tight', sans-serif; border-radius: 99px; padding: 1px 7px; line-height: 16px; }
+nav a.phoneonly { display: none; }
+@media (max-width: 820px) {
+  nav { overflow-x: visible; justify-content: space-around; }
+  nav a.nsec { display: none !important; }
+  nav a.phoneonly { display: flex; }
+  nav a { flex: 1 1 0; min-width: 0; }
+  nav a .lbl { white-space: nowrap; overflow: hidden; text-overflow: ellipsis; max-width: 100%; }
+  .navbadge { position: absolute; top: 2px; left: calc(50% + 4px); margin: 0; padding: 0 6px; font-size: 10px; }
+  #shell::before { content: ""; position: fixed; top: 0; left: 0; right: 0; height: env(safe-area-inset-top); background: var(--void); z-index: 30; }
+  main { padding-top: calc(18px + env(safe-area-inset-top)); }
+  #toast { bottom: calc(84px + env(safe-area-inset-bottom)); }
+}
+
+/* press feedback and motion (quick, purposeful; off for reduced motion) */
+.btn, .chip, nav a, .obx-link, .obx-msg, .obx-banner { transition: transform 160ms var(--ease-out), border-color 160ms ease, background-color 160ms ease; -webkit-tap-highlight-color: transparent; }
+.btn:active:not(:disabled), .chip:active, nav a:active, .obx-link:active, .obx-banner:active { transform: scale(0.97); }
+.mbox { transition: opacity 200ms var(--ease-out), transform 200ms var(--ease-out); }
+@starting-style { .mbox { opacity: 0; transform: translateY(8px) scale(0.98); } }
+@media (hover: none) { nav a:hover { background: transparent; color: var(--muted); } nav a.on:hover { background: var(--night); color: var(--bone); } }
+@media (prefers-reduced-motion: reduce) { .btn, .chip, nav a, .mbox, .obx-link { transition: none; transform: none !important; } .ob-spin { animation-duration: 1.6s; } }
+
+/* forms inside our modals */
+#obx-modal { position: fixed; inset: 0; z-index: 70; display: flex; align-items: center; justify-content: center; padding: 16px; }
+body.obx-noscroll { overflow: hidden; }
+.mbox.obx-xwide { width: min(1180px, 100%); }
+.obx-mhead { display: flex; justify-content: space-between; align-items: center; gap: 12px; }
+.obx-x { background: none; border: 0; color: var(--muted); font-size: 28px; width: 44px; height: 44px; cursor: pointer; border-radius: 10px; }
+.obx-form { display: flex; flex-direction: column; gap: 12px; }
+.obx-r2 { display: grid; grid-template-columns: minmax(0, 1fr) minmax(0, 1fr); gap: 12px; }
+.obx-r3 { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 12px; }
+.obx-form input.f, .obx-form select { width: 100%; height: 44px; }
+.obx-form input[type=date] { -webkit-appearance: none; appearance: none; min-width: 0; display: block; color-scheme: dark; }
+.obx-line { border: 1px solid var(--row); border-radius: 12px; padding: 12px; display: flex; flex-direction: column; gap: 10px; }
+.obx-rm { background: none; border: 0; color: var(--pill-late); font: 13px 'Inter Tight', sans-serif; cursor: pointer; align-self: flex-start; padding: 2px 0; }
+.obx-reason { font-size: 12px; color: var(--pill-info); }
+.obx-sum { color: var(--muted); font-size: 14px; }
+.obx-sum b { color: var(--bone); }
+.obx-err { color: var(--over); min-height: 16px; font-size: 14px; }
+.obx-actions { position: sticky; bottom: -22px; background: var(--night); padding: 10px 0 2px; }
+.obx-danger { color: var(--over); border-color: #5a2034; }
+.obx-sm { height: 36px; padding: 0 14px; font-size: 13px; }
+
+/* review: document beside the suggestion */
+.obx-review { display: grid; grid-template-columns: minmax(0, 1fr) minmax(0, 1.05fr); gap: 20px; align-items: start; }
+.obx-doc { position: sticky; top: 0; display: flex; flex-direction: column; gap: 6px; }
+.obx-frame { background: #fff; border-radius: 12px; height: 72vh; min-height: 380px; overflow: hidden; display: flex; align-items: center; justify-content: center; }
+.obx-frame iframe { width: 100%; height: 100%; border: 0; }
+.obx-frame img { max-width: 100%; max-height: 100%; object-fit: contain; }
+.obx-frame .note { color: #6B6683; padding: 16px; text-align: center; }
+
+/* Entries: + Add menu */
+.obx-addwrap { position: relative; }
+.obx-menu { position: absolute; right: 0; top: 52px; z-index: 40; background: var(--night); border: 1px solid var(--border); border-radius: 14px; padding: 6px; width: 290px; box-shadow: 0 18px 40px rgba(0, 0, 0, .5); display: flex; flex-direction: column; transform-origin: top right; transition: opacity 160ms var(--ease-out), transform 160ms var(--ease-out); }
+@starting-style { .obx-menu { opacity: 0; transform: scale(0.97); } }
+.obx-menu button { background: none; border: 0; text-align: left; padding: 12px; border-radius: 10px; color: var(--bone); cursor: pointer; display: flex; flex-direction: column; gap: 2px; font: 500 15px 'Inter Tight', sans-serif; }
+.obx-menu button span { color: var(--muted); font-size: 12px; font-weight: 400; }
+.obx-menu button:hover, .obx-menu button:focus-visible { background: var(--row); }
+
+/* Read by Claude */
+.obx-drop { display: flex; flex-direction: column; gap: 8px; align-items: center; text-align: center; border: 1.5px dashed var(--border); border-radius: 16px; padding: 26px 18px; background: var(--night); cursor: pointer; margin-bottom: 18px; transition: border-color 160ms ease, background-color 160ms ease; }
+.obx-drop.over, .obx-drop:hover { border-color: var(--cobalt); }
+.obx-drop.busy { cursor: progress; border-style: solid; }
+.obx-droptitle { font: 800 22px 'Big Shoulders Display', sans-serif; text-transform: uppercase; letter-spacing: .02em; }
+.obx-drop .note { max-width: 620px; }
+.obx-sec { margin-bottom: 22px; }
+.obx-sechead { display: flex; justify-content: space-between; align-items: center; gap: 12px; margin-bottom: 10px; flex-wrap: wrap; }
+.bar { height: 8px; border-radius: 99px; background: var(--row); overflow: hidden; display: block; }
+.bar > i { display: block; height: 100%; background: linear-gradient(90deg, var(--cobalt), var(--uv), var(--magenta)); }
+.obx-billtag { cursor: pointer; margin-left: 4px; }
+
+/* dashboard banners */
+.obx-banner { display: flex; align-items: center; gap: 12px; width: 100%; text-align: left; background: var(--night); border: 1px solid var(--border); border-radius: 14px; padding: 12px 16px; margin-bottom: 12px; color: var(--bone); font: 14px 'Inter Tight', sans-serif; cursor: pointer; }
+.obx-banner > span:nth-child(2) { flex: 1; color: var(--muted); }
+.obx-banner b { color: var(--bone); }
+.obx-go { color: var(--link); white-space: nowrap; font-weight: 500; }
+@media (hover: hover) { .obx-banner:hover { border-color: var(--cobalt); } }
+
+/* inbox */
+.obx-inbox { display: grid; grid-template-columns: 300px minmax(0, 1fr); gap: 14px; align-items: start; }
+.obx-msgs { display: flex; flex-direction: column; gap: 8px; }
+.obx-msg { background: var(--night); border: 1px solid var(--border); border-radius: 12px; padding: 12px 14px; text-align: left; color: var(--muted); display: flex; flex-direction: column; gap: 4px; cursor: pointer; font: 14px 'Inter Tight', sans-serif; }
+.obx-msg b { color: var(--bone); font-weight: 600; }
+.obx-msg.on { border-color: var(--cobalt); }
+.obx-msg.unread b::before { content: ""; display: inline-block; width: 8px; height: 8px; border-radius: 50%; background: var(--magenta); margin-right: 8px; vertical-align: 1px; }
+.obx-msg .tag { align-self: flex-start; }
+.obx-read { padding: 20px 22px; }
+.obx-body { color: var(--bone); line-height: 1.6; white-space: pre-wrap; margin-bottom: 14px; }
+.obx-issues { display: flex; flex-direction: column; }
+.obx-issue { display: flex; justify-content: space-between; gap: 16px; align-items: center; padding: 14px 0; border-top: 1px solid var(--row); }
+.obx-issue .note { margin-top: 4px; }
+.obx-issue .btnrow { flex: none; }
+
+/* More (phone) */
+.obx-more { display: grid; grid-template-columns: repeat(auto-fill, minmax(150px, 1fr)); gap: 12px; }
+.obx-link { display: flex; flex-direction: column; gap: 10px; align-items: flex-start; cursor: pointer; color: var(--bone); text-decoration: none; }
+.obx-link .nico { width: 24px; height: 24px; color: var(--teal); }
+.obx-link b { font: 800 20px 'Big Shoulders Display', sans-serif; text-transform: uppercase; }
+
+@media (max-width: 900px) {
+  .obx-review, .obx-inbox { grid-template-columns: minmax(0, 1fr); }
+  .obx-doc { position: static; }
+  .obx-frame { height: 52vh; min-height: 280px; }
+}
+@media (max-width: 820px) {
+  #obx-modal { padding: 0; align-items: stretch; }
+  #obx-modal .mbox, #modal .mbox { width: 100%; max-height: none; height: 100%; border-radius: 0; border: 0; padding: calc(16px + env(safe-area-inset-top)) 16px calc(16px + env(safe-area-inset-bottom)); }
+  #modal { padding: 0; align-items: stretch; }
+  .obx-r3 { grid-template-columns: minmax(0, 1fr) minmax(0, 1fr); }
+  .obx-r3 > :last-child { grid-column: 1 / -1; }
+  .obx-menu { position: fixed; left: 12px; right: 12px; top: auto; bottom: calc(78px + env(safe-area-inset-bottom)); width: auto; z-index: 65; transform-origin: bottom center; box-shadow: 0 -12px 40px rgba(0, 0, 0, .6); }
+  .obx-menu button { padding: 14px; }
+  .obx-issue { flex-direction: column; align-items: flex-start; }
+  .obx-banner { flex-wrap: wrap; }
+  input.f[type=date], .fld input[type=date] { -webkit-appearance: none; appearance: none; min-width: 0; max-width: 100%; display: block; }
+}

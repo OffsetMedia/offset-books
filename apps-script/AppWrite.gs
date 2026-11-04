@@ -26,7 +26,10 @@ var OBW_ACTIONS = {
   obwSaveClient: obwSaveClient_,
   obwUploadBill: obwUploadBill_,
   obwDecideBill: obwDecideBill_,
-  obwBillFile: obwBillFile_
+  obwBillFile: obwBillFile_,
+  obwInbox: obwInbox_,
+  obwRunAudit: obwRunAudit_,
+  obwInboxAction: obwInboxAction_
 };
 
 // Fields the app may write. Anything else in a request is ignored.
@@ -669,4 +672,217 @@ function obwBillFile_(user, args) {
   var s = JSON.parse(a.suggestion || '{}'), file = DriveApp.getFileById(s.file_id), blob = file.getBlob();
   if (blob.getBytes().length > 15 * 1024 * 1024) return { url: file.getUrl(), mime: blob.getContentType(), data: '' };
   return { url: file.getUrl(), mime: blob.getContentType(), data: Utilities.base64Encode(blob.getBytes()) };
+}
+
+
+/* ================= Claude's weekly check and the in-app inbox ================= */
+
+var OBW_INBOX_COLS = ['id', 'time', 'kind', 'title', 'body', 'issues', 'status', 'trigger'];
+var OBW_ASSIGNABLE = ['Equipment rental', 'Crew / freelancer', 'Location & venue'];
+
+function obwInboxTable_() {
+  var ss = obwSs_(), sh = ss.getSheetByName('Inbox');
+  if (!sh) { sh = ss.insertSheet('Inbox'); sh.getRange(1, 1, 1, OBW_INBOX_COLS.length).setValues([OBW_INBOX_COLS]); sh.setFrozenRows(1); }
+  return obwTable_('Inbox');
+}
+
+function obwDismissed_() {
+  try { return JSON.parse(PropertiesService.getScriptProperties().getProperty('OBW_DISMISSED') || '{}'); } catch (x) { return {}; }
+}
+
+function obwNum_(v) { var n = Number(String(v == null ? '' : v).replace(/,/g, '')); return isFinite(n) ? n : 0; }
+function obwDays_(a, b) { return Math.round((new Date(b + 'T00:00:00') - new Date(a + 'T00:00:00')) / 86400000); }
+
+/** The checks. Each issue: { key, severity: high|medium|low, title, detail, action: { type, id } } */
+function obwAuditIssues_() {
+  var today = Utilities.formatDate(new Date(), 'Asia/Colombo', 'yyyy-MM-dd');
+  var st = obwSettings_(), E = obwTable_('Entries').rows, P = obwTable_('Projects').rows, I = obwTable_('Invoices').rows.filter(function (i) { return i.number; });
+  var issues = [], money = function (n) { return Math.round(n).toLocaleString('en-US'); };
+  function add(key, sev, title, detail, action) { issues.push({ key: key, severity: sev, title: title, detail: detail, action: action || null }); }
+  var invByNo = {}; I.forEach(function (i) { invByNo[i.number] = i; });
+
+  // 1. income lines that point at a missing invoice, or at an invoice for a different client
+  var perInv = {};
+  E.forEach(function (e) {
+    if (e.kind !== 'income') return;
+    var m = /INV-\d+/.exec(String(e.description || '')); if (!m) return;
+    var no = m[0], inv = invByNo[no];
+    (perInv[no] = perInv[no] || []).push(e);
+    if (!inv) add('inc-noinv-' + e.id, 'high', e.id + ' points at ' + no + ', which is not in Invoices', 'LKR ' + money(obwNum_(e.amount)) + ' from ' + e.payee + ' on ' + e.date + ' is counted as income, but there is no such invoice. If it was a test or a deleted invoice, delete this line.', { type: 'entry', id: e.id });
+    else if (inv.client && e.payee && String(inv.client).trim() !== String(e.payee).trim() && inv.client.indexOf(e.payee) === -1 && e.payee.indexOf(inv.client) === -1)
+      add('inc-client-' + e.id, 'high', e.id + ' says ' + no + ' is from ' + e.payee + ', but that invoice is billed to ' + inv.client, 'Two different documents may share one number. Check which is right and fix or delete the line.', { type: 'entry', id: e.id });
+  });
+  Object.keys(perInv).forEach(function (no) {
+    var inv = invByNo[no]; if (!inv) return;
+    var sum = perInv[no].reduce(function (t, e) { return t + obwNum_(e.amount); }, 0), due = obwNum_(inv.total) - obwNum_(inv.advance_applied);
+    if (sum > due + 1) add('inc-double-' + no, 'high', 'Income for ' + no + ' is counted more than once', perInv[no].map(function (e) { return e.id; }).join(', ') + ' add up to LKR ' + money(sum) + ' but the invoice is LKR ' + money(due) + '.', { type: 'search', id: no });
+  });
+
+  // 1b. sent invoices with no income line (income would be understated)
+  I.forEach(function (inv) {
+    if (!/^INV-/.test(inv.number) || inv.status === 'draft' || inv.status === 'void' || inv.status === 'cancelled') return;
+    if (!perInv[inv.number]) add('inv-noinc-' + inv.number, 'high', inv.number + ' (' + inv.client + ', LKR ' + money(obwNum_(inv.total)) + ') has no income line', 'The invoice exists but nothing in Entries counts it as income, so profit is understated. Add the income line (open the invoice and mark it sent, or add it in Entries).', { type: 'invoice', id: inv.number });
+  });
+
+  // 2. zero-amount lines
+  E.forEach(function (e) { if ((e.kind === 'cost' || e.kind === 'income') && obwNum_(e.amount) === 0) add('zero-' + e.id, 'medium', e.id + ' has no amount', e.payee + ': ' + (e.description || '') + (e.notes ? ' (' + e.notes + ')' : ''), { type: 'entry', id: e.id }); });
+
+  // 3. supplier costs with no project
+  E.forEach(function (e) {
+    if (e.kind === 'cost' && !e.project && e.allocation !== 'overhead' && e.business_line !== 'AI data' && (OBW_ASSIGNABLE.indexOf(e.cost_type) !== -1 || /^5/.test(String(e.account))))
+      add('assign-' + e.id, 'medium', e.payee + ' LKR ' + money(obwNum_(e.amount)) + ' has no project', e.date + ' · ' + e.cost_type + '. Assign it, split it across projects, or mark it as overhead.', { type: 'split', id: e.id });
+  });
+
+  // 4. possible duplicate costs (same payee and amount within 3 days, not the same bill)
+  var costs = E.filter(function (e) { return e.kind === 'cost' && obwNum_(e.amount) > 500; }).sort(function (a, b) { return String(a.date).localeCompare(String(b.date)); });
+  for (var i = 0; i < costs.length; i++) for (var j = i + 1; j < costs.length; j++) {
+    var a = costs[i], b = costs[j]; if (obwDays_(a.date, b.date) > 3) break;
+    if (a.payee === b.payee && obwNum_(a.amount) === obwNum_(b.amount) && !(a.bill_id && a.bill_id === b.bill_id) && !/uber|pickme/i.test(a.payee))
+      add('dup-' + a.id + '-' + b.id, 'medium', 'Possible duplicate: ' + a.id + ' and ' + b.id, a.payee + ', LKR ' + money(obwNum_(a.amount)) + ' on ' + a.date + ' and ' + b.date + '.', { type: 'entry', id: b.id });
+  }
+
+  // 5. missing documents, grouped by payee (costs of 5,000+ older than 2 weeks)
+  var miss = {};
+  E.forEach(function (e) {
+    if (e.kind !== 'cost' || e.doc_url || obwNum_(e.amount) < 5000 || obwDays_(e.date, today) < 14) return;
+    var ds = String(e.doc_status || '').toLowerCase();
+    if (ds && ds !== 'none' && ds !== 'bank line only') return;
+    if (/^60[13]0$/.test(String(e.account))) return; // director pay, software: bank line is enough
+    var m = miss[e.payee] = miss[e.payee] || { n: 0, amt: 0 }; m.n++; m.amt += obwNum_(e.amount);
+  });
+  Object.keys(miss).forEach(function (p) { add('doc-' + p, 'low', 'No invoice yet from ' + p, miss[p].n + ' line' + (miss[p].n === 1 ? '' : 's') + ', LKR ' + money(miss[p].amt) + '. Ask for the invoice, then upload it in Entries.', { type: 'search', id: p }); });
+
+  // 6. overdue invoices
+  I.forEach(function (inv) {
+    if (['sent', 'part paid', 'overdue'].indexOf(inv.status) === -1) return;
+    var bal = obwNum_(inv.total) - obwNum_(inv.advance_applied) - obwNum_(inv.paid_amount);
+    if (bal > 1 && inv.due && inv.due < today) add('late-' + inv.number, obwDays_(inv.due, today) > 14 ? 'high' : 'medium', inv.number + ' is ' + obwDays_(inv.due, today) + (obwDays_(inv.due, today) === 1 ? ' day' : ' days') + ' overdue', inv.client + ' owes LKR ' + money(bal) + ' (due ' + inv.due + '). Send a reminder or record the payment.', { type: 'invoice', id: inv.number });
+  });
+
+  // 7. projects over budget
+  var BT = { 'Equipment rental': 'budget_equipment_rental', 'Crew / freelancer': 'budget_crew', 'Transport': 'budget_transport', 'Food': 'budget_food', 'Location & venue': 'budget_location', 'Other': 'budget_other' };
+  P.forEach(function (p) {
+    Object.keys(BT).forEach(function (ct) {
+      var b = obwNum_(p[BT[ct]]); if (!b) return;
+      var a = E.filter(function (e) { return e.kind === 'cost' && e.project === p.id && e.cost_type === ct; }).reduce(function (t, e) { return t + obwNum_(e.amount); }, 0);
+      if (a > b * 1.0001) add('over-' + p.id + '-' + ct, 'medium', p.name + ': ' + ct + ' is over budget', 'Spent LKR ' + money(a) + ' against a budget of LKR ' + money(b) + '. Update the budget or check the costs.', { type: 'project', id: p.id });
+    });
+  });
+
+  // 8. withholding tax: payments to one person in one month
+  var wht = {}, alertAt = obwNum_(st.wht_alert) || 80000, limit = obwNum_(st.wht_threshold) || 100000;
+  E.forEach(function (e) { if (e.kind === 'cost' && /^(5020|6020|6010)$/.test(String(e.account)) && !/joshua/i.test(e.payee)) { var k = e.payee + '|' + String(e.date).slice(0, 7); wht[k] = (wht[k] || 0) + obwNum_(e.amount); } });
+  Object.keys(wht).forEach(function (k) {
+    var v = wht[k], pp = k.split('|');
+    if (v >= alertAt) add('wht-' + k, v > limit ? 'high' : 'low', pp[0] + ': LKR ' + money(v) + ' in ' + pp[1], v > limit ? 'Over LKR ' + money(limit) + ' in one month, so 5% WHT applies on the full amount. Check with the accountant.' : 'Close to the LKR ' + money(limit) + ' WHT limit for this month.', { type: 'search', id: pp[0] });
+  });
+
+  // 9. settings sanity
+  var vat = String(st.vat_registered || '').toLowerCase();
+  if (vat && ['yes', 'no', 'true', 'false'].indexOf(vat) === -1) add('set-vat', 'low', 'Settings: vat_registered says "' + st.vat_registered + '"', 'It should be yes or no. Fix it in the Settings tab.', { type: 'settings' });
+  var maxInv = 0; I.forEach(function (x) { var m = /(\d+)$/.exec(x.number); if (m) maxInv = Math.max(maxInv, Number(m[1])); });
+  var last = /(\d+)$/.exec(String(st.last_invoice_number || ''));
+  if (last && Number(last[1]) < maxInv) add('set-invno', 'high', 'Invoice numbering is behind', 'Settings says the last invoice was ' + st.last_invoice_number + ', but Invoices already has a higher number. The next invoice could reuse a number.', { type: 'settings' });
+
+  // 10. unpaid costs older than 30 days
+  E.forEach(function (e) { if (e.kind === 'cost' && e.paid_status === 'unpaid' && obwNum_(e.amount) > 0 && obwDays_(e.date, today) > 30) add('unpaid-' + e.id, 'low', 'Unpaid for ' + obwDays_(e.date, today) + ' days: ' + e.payee + ' LKR ' + money(obwNum_(e.amount)), (e.description || '') + '. Pay it, or mark it paid if it already went out.', { type: 'entry', id: e.id }); });
+
+  // 11. bank: unsorted lines and statement freshness
+  try {
+    var newLines = obwTable_('BankLines').rows.filter(function (b) { return b.id && String(b.status || 'new') === 'new'; }).length;
+    if (newLines) add('bank-new', 'medium', newLines + ' bank line' + (newLines === 1 ? '' : 's') + ' not sorted yet', 'Open Bank and run the sorting so they turn into entries.', { type: 'bank' });
+    var stm = obwTable_('Statements').rows.filter(function (x) { return x.id; }).map(function (x) { return String(x.to).slice(0, 10); }).sort();
+    var lastTo = stm[stm.length - 1];
+    if (lastTo && obwDays_(lastTo, today) > 9) add('bank-old', 'low', 'Latest bank statement ends ' + lastTo, 'Upload this week\'s HNB statement on the Bank page.', { type: 'bank' });
+  } catch (x) { /* bank tabs optional */ }
+
+  // 12. approvals waiting
+  try {
+    var A = obwTable_('Approvals').rows.filter(function (a) { return a.status === 'pending'; });
+    var bills = A.filter(function (a) { return a.source === 'bill_upload'; }).length, other = A.length - bills;
+    if (bills) add('rev-bills', 'medium', bills + ' bill' + (bills === 1 ? '' : 's') + ' read by Claude waiting for you', 'Review and approve them in Entries.', { type: 'review' });
+    if (other) add('rev-queue', 'low', other + ' item' + (other === 1 ? '' : 's') + ' waiting in Approvals', 'From bank sorting or submissions.', { type: 'queue' });
+  } catch (x) { /* optional */ }
+
+  var dis = obwDismissed_();
+  issues = issues.filter(function (x) { return !dis[x.key]; });
+  var rank = { high: 0, medium: 1, low: 2 };
+  issues.sort(function (a, b) { return rank[a.severity] - rank[b.severity]; });
+  return issues;
+}
+
+function obwAuditSummary_(issues) {
+  var counts = { high: 0, medium: 0, low: 0 }; issues.forEach(function (x) { counts[x.severity]++; });
+  var fallback = issues.length ? 'I found ' + issues.length + ' thing' + (issues.length === 1 ? '' : 's') + ' to look at (' + counts.high + ' urgent, ' + counts.medium + ' to fix, ' + counts.low + ' minor). Start with: ' + issues.slice(0, 3).map(function (x) { return x.title; }).join('; ') + '.' : 'Everything checks out. No issues found this week.';
+  if (!issues.length) return fallback;
+  try {
+    var st = obwSettings_(), budget = Number(st.claude_monthly_budget_usd) || 4;
+    if (obwMonthSpend_() >= budget) return fallback;
+    var text = obwCallClaude_(st.claude_model_fast || 'claude-haiku-5-5',
+      'You are the bookkeeping assistant inside Offset Books for Joshua, director of Offset Media (a Sri Lankan photo and video production company). Write him a short inbox message (at most 110 words, plain text, no headings, no bullet symbols) summarising this week\'s check of his books: what matters most and what to fix first. Be specific with numbers and names from the list. Do not invent anything not in the list.',
+      [{ type: 'text', text: issues.slice(0, 60).map(function (x) { return '[' + x.severity + '] ' + x.title + ' - ' + x.detail; }).join('\n') }], 'weekly check summary');
+    text = String(text || '').trim();
+    return (text.length < 20 || /^[\[{]/.test(text)) ? fallback : text;
+  } catch (x) { return fallback; }
+}
+
+function obwRunAuditCore_(trigger) {
+  var issues = obwAuditIssues_(), body = obwAuditSummary_(issues);
+  var counts = { high: 0, medium: 0, low: 0 }; issues.forEach(function (x) { counts[x.severity]++; });
+  var title = issues.length ? 'Weekly check: ' + issues.length + ' to look at' + (counts.high ? ' (' + counts.high + ' urgent)' : '') : 'Weekly check: all clear';
+  var lock = obwLock_();
+  try {
+    var t = obwInboxTable_();
+    var msg = { id: obwNextId_(t.rows, 'M', 4), time: obwNow_(), kind: 'audit', title: title, body: body, issues: JSON.stringify(issues), status: 'unread', trigger: trigger || 'manual' };
+    t.sh.appendRow(obwRowArray_(t, msg));
+    msg.issues = issues;
+    return msg;
+  } finally { lock.releaseLock(); }
+}
+
+function obwEnsureWeeklyTrigger_() {
+  try {
+    var has = ScriptApp.getProjectTriggers().some(function (tr) { return tr.getHandlerFunction() === 'obwWeeklyAudit'; });
+    if (!has) ScriptApp.newTrigger('obwWeeklyAudit').timeBased().onWeekDay(ScriptApp.WeekDay.MONDAY).atHour(9).create();
+    return true;
+  } catch (x) { return false; }
+}
+
+/** Runs every Monday at about 9am (Colombo) once set up. */
+function obwWeeklyAudit() { obwRunAuditCore_('weekly'); }
+
+function obwInbox_(user) {
+  obwRequireAdmin_(user);
+  var t = obwInboxTable_();
+  var msgs = t.rows.filter(function (r) { return r.id; }).slice(-30).reverse().map(function (r) {
+    var o = obwPublic_(r); try { o.issues = JSON.parse(r.issues || '[]'); } catch (x) { o.issues = []; } return o;
+  });
+  var dis = obwDismissed_();
+  msgs.forEach(function (m) { m.issues = m.issues.filter(function (x) { return !dis[x.key]; }); });
+  var trig = false; try { trig = ScriptApp.getProjectTriggers().some(function (tr) { return tr.getHandlerFunction() === 'obwWeeklyAudit'; }); } catch (x) { /* ignore */ }
+  return { messages: msgs, weekly: trig };
+}
+
+function obwRunAudit_(user, args) {
+  obwRequireAdmin_(user);
+  var weekly = obwEnsureWeeklyTrigger_();
+  var msg = obwRunAuditCore_(args[0] || 'manual');
+  return { message: msg, weekly: weekly };
+}
+
+/** args = [messageId, 'read' | 'dismiss', issueKey] */
+function obwInboxAction_(user, args) {
+  obwRequireAdmin_(user);
+  var id = String(args[0] || ''), action = args[1], key = args[2];
+  if (action === 'dismiss' && key) {
+    var dis = obwDismissed_(); dis[key] = obwNow_();
+    PropertiesService.getScriptProperties().setProperty('OBW_DISMISSED', JSON.stringify(dis));
+    return { dismissed: key };
+  }
+  if (action === 'read') {
+    var t = obwInboxTable_();
+    for (var i = 0; i < t.rows.length; i++) if (String(t.rows[i].id) === id) { obwWriteCells_(t, t.rows[i]._row, { status: 'read' }, ['status']); return { id: id, status: 'read' }; }
+    throw obwErr_('Message not found.');
+  }
+  throw obwErr_('Unknown action.');
 }
