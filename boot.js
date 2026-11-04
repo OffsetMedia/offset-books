@@ -126,6 +126,34 @@
     initGsi();
     if (!st.token && !st.booting) { try { google.accounts.id.prompt(); } catch (e) { /* the button still works */ } }
   };
+
+  /* ---------- new version check: offer a one-tap reload when a newer build is published ---------- */
+  var ver = { loaded: '', shown: false };
+  function checkVersion() {
+    if (document.visibilityState !== 'visible' || ver.shown) return;
+    fetch('version.json?t=' + Date.now(), { cache: 'no-store' }).then(function (r) { return r.ok ? r.json() : null; }).then(function (v) {
+      if (!v || !v.version) return;
+      if (!ver.loaded) { ver.loaded = v.version; return; }
+      if (v.version !== ver.loaded) showUpdate();
+    }, function () { /* offline */ });
+  }
+  function showUpdate() {
+    ver.shown = true;
+    var bar = document.createElement('div');
+    bar.className = 'ob-update'; bar.setAttribute('role', 'status');
+    bar.innerHTML = '<span>A new version of Offset Books is ready.</span><button type="button">Update</button>';
+    bar.querySelector('button').addEventListener('click', function () {
+      var busy = document.getElementById('obx-modal') || (window.state && (state.modal || state.view === 'edit'));
+      if (busy && !confirm('You have a form open. Update anyway? Anything not saved will be lost.')) return;
+      if (navigator.serviceWorker && navigator.serviceWorker.getRegistration) {
+        navigator.serviceWorker.getRegistration().then(function (reg) { if (reg) reg.update(); }).catch(function () {}).then(function () { location.reload(); });
+      } else location.reload();
+    });
+    document.body.appendChild(bar);
+  }
+  checkVersion();
+  setInterval(checkVersion, 120000);
+  document.addEventListener('visibilitychange', checkVersion);
   if ('serviceWorker' in navigator) window.addEventListener('load', function () { navigator.serviceWorker.register('sw.js').catch(function () { /* fine without it */ }); });
   start();
   if (window.google && google.accounts && google.accounts.id) window.OB_GSI_READY();

@@ -228,3 +228,8 @@ body.obx-noscroll { overflow: hidden; }
 [data-theme="light"] .chart line[stroke="#221C3D"], [data-theme="light"] svg line[stroke="#221C3D"] { stroke: #ECE9F4; }
 [data-theme="light"] svg rect[fill="#1C1838"] { fill: #EEF0FF; }
 [data-theme="light"] .chart text.sel { fill: var(--bone); }
+
+/* new-version bar */
+.ob-update { position: fixed; left: 50%; transform: translateX(-50%); bottom: calc(20px + env(safe-area-inset-bottom)); z-index: 90; display: flex; align-items: center; gap: 14px; background: var(--night); border: 1px solid var(--cobalt); color: var(--bone); border-radius: 14px; padding: 10px 10px 10px 16px; font: 14px 'Inter Tight', sans-serif; box-shadow: 0 12px 34px rgba(0, 0, 0, .35); max-width: calc(100vw - 24px); }
+.ob-update button { background: var(--cobalt); color: #fff; border: 0; border-radius: 999px; height: 36px; padding: 0 16px; font: 600 13px 'Inter Tight', sans-serif; cursor: pointer; }
+@media (max-width: 820px) { .ob-update { bottom: calc(86px + env(safe-area-inset-bottom)); } }
