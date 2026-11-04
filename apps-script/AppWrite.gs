@@ -34,7 +34,8 @@ var OBW_ACTIONS = {
   obwSaveShoot: obwSaveShoot_,
   obwDeleteShoot: obwDeleteShoot_,
   obwPlanShoots: obwPlanShoots_,
-  obwShootsToBudget: obwShootsToBudget_
+  obwShootsToBudget: obwShootsToBudget_,
+  obwPing: obwPing_
 };
 
 // Fields the app may write. Anything else in a request is ignored.
@@ -1031,4 +1032,23 @@ function obwShootsToBudget_(user, args) {
   var p = obwSyncProject_(user, pid);
   if (!p) throw obwErr_('This project has no shoots with amounts yet.');
   return { project: p };
+}
+
+
+/* ================= live updates: a cheap "has anything changed?" check ================= */
+
+/**
+ * Returns a change stamp built from the row counts of the tabs people write to, plus the last AuditLog line.
+ * Every save in Code.gs and AppWrite.gs logs to AuditLog, so the stamp moves whenever anyone changes anything.
+ * Reads only last-row numbers and one AuditLog row, so it is fast enough to call every few seconds.
+ */
+function obwPing_(user) {
+  var ss = obwSs_(), tabs = ['AuditLog', 'Entries', 'Approvals', 'Invoices', 'Quotes', 'Projects', 'Clients', 'Shoots', 'Inbox', 'BankLines', 'Statements'];
+  var parts = tabs.map(function (n) { var sh = ss.getSheetByName(n); return sh ? sh.getLastRow() : 0; });
+  var last = null, al = ss.getSheetByName('AuditLog');
+  if (al && al.getLastRow() > 1) {
+    var v = al.getRange(al.getLastRow(), 1, 1, 8).getDisplayValues()[0];
+    last = { time: v[0], user: v[1], tab: v[2], record: v[3], field: v[4], reason: v[7] };
+  }
+  return { rev: parts.join('.') + '|' + (last ? last.time + last.record + last.field : ''), last: last };
 }

@@ -326,6 +326,7 @@
   OBX.start = function () {
     if (admin()) loadInbox();
     loadShoots();
+    startLive();
     document.body.classList.add('obx-ready');
   };
   OBX.afterStatement = function () { runCheck('statement'); };
@@ -548,6 +549,50 @@
       api('obwShootsToBudget', [pid]).then(function (r) { DATA.projects = DATA.projects.map(function (p) { return p.id === pid ? Object.assign({}, p, r.project) : p; }); rerender(); say('Project budget now matches the shoots', true); }, function (e) { el.disabled = false; say(e.message); });
     }
   }, true);
+
+
+  /* ---------- live updates: check every 15 s while open; reload quietly when someone else changes something ---------- */
+  var live = { rev: '', timer: null, busy: false, every: 15000 };
+  function whoName(email) {
+    var u = ((DATA.users || []).filter(function (x) { return String(x.email).toLowerCase() === String(email).toLowerCase(); })[0]) || {};
+    return u.name || String(email || 'someone').split('@')[0];
+  }
+  function editing() {
+    if ($('obx-modal') || (state && (state.modal || state.view === 'edit'))) return true;
+    var a = document.activeElement;
+    return !!(a && /^(INPUT|TEXTAREA|SELECT)$/.test(a.tagName) && a.value);
+  }
+  function silentReload(last) {
+    live.busy = true;
+    var y = window.scrollY;
+    Promise.all([api('getBootData', []), api('obwShoots', []).catch(function () { return null; })]).then(function (r) {
+      if (editing()) { live.rev = ''; return; }            // someone started typing meanwhile: try again next round
+      window.DATA = r[0]; if (r[1]) shoots.list = r[1];
+      try { window.C = compute(); } catch (x) { /* ignore */ }
+      go(state.view); window.scrollTo(0, y);
+      if (admin()) loadInbox();
+      var me = String((DATA.user || {}).email || '').toLowerCase();
+      if (last && last.user && String(last.user).toLowerCase() !== me) say('Updated with changes from ' + whoName(last.user) + (last.tab ? ' (' + last.tab + ')' : ''), true);
+    }, function () { /* offline or asleep: try again next round */ }).then(function () { live.busy = false; });
+  }
+  function tick(force) {
+    if (live.busy || document.visibilityState !== 'visible') return;
+    if (!force && editing()) return;
+    api('obwPing', []).then(function (p) {
+      if (!live.rev) { live.rev = p.rev; return; }
+      if (p.rev !== live.rev) {
+        if (editing()) return;                             // keep the old stamp; reload once the form is closed
+        live.rev = p.rev; silentReload(p.last);
+      }
+    }, function () { /* ignore: next tick retries */ });
+  }
+  function startLive() {
+    clearInterval(live.timer);
+    live.timer = setInterval(tick, live.every);
+    document.addEventListener('visibilitychange', function () { if (document.visibilityState === 'visible') tick(true); });
+    window.addEventListener('focus', function () { tick(); });
+    tick(true);
+  }
 
   /* ---------- clicks (capture phase, so legacy handlers never see ours) ---------- */
   document.addEventListener('click', function (ev) {
