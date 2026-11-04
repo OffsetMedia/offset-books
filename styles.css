@@ -218,3 +218,36 @@ body.noscroll { overflow: hidden; }
   .card .big { font-size: 26px; }
   .page-title { font-size: 34px; }
 }
+
+/* ---- phone fixes ---- */
+/* iOS date inputs ignore width and spill out of their box */
+input[type=date] { -webkit-appearance: none; appearance: none; display: block; min-width: 0; max-width: 100%; text-align: left; }
+input[type=date]::-webkit-date-and-time-value { text-align: left; margin: 0; }
+input[type=date]::-webkit-calendar-picker-indicator { opacity: .6; }
+.row2 > *, .row3 > * { min-width: 0; }
+select { text-overflow: ellipsis; }
+
+/* keep content from scrolling under the iPhone status bar in the installed app */
+.app::before { content: ""; position: fixed; top: 0; left: 0; right: 0; height: env(safe-area-inset-top); background: var(--void); z-index: 30; pointer-events: none; }
+
+/* tables become stacked rows on phones: no sideways scrolling */
+@media (max-width: 700px) {
+  .tablewrap { overflow-x: visible; }
+  .tablewrap table, .tablewrap tbody, .tablewrap tr, .tablewrap td { display: block; width: 100%; }
+  .tablewrap thead { display: none; }
+  .tablewrap tr { padding: 12px 0; border-bottom: 1px solid var(--row); }
+  .tablewrap tr:last-child { border-bottom: 0; }
+  .tablewrap td { border: 0; padding: 3px 0; display: flex; justify-content: space-between; align-items: baseline; gap: 14px; text-align: right; white-space: normal; }
+  .tablewrap td::before { content: attr(data-label); font-family: var(--font-mono); font-size: 10.5px; letter-spacing: .06em; text-transform: uppercase; color: var(--muted2); text-align: left; flex: none; }
+  .tablewrap td:first-child { font-size: 16px; padding-bottom: 6px; }
+  .tablewrap td:first-child::before { content: none; }
+  .tablewrap td:first-child, .tablewrap td.num { text-align: left; }
+  .tablewrap td.num { justify-content: space-between; }
+  .tablewrap td:empty, .tablewrap td[data-label=""] { display: none; }
+  .tablewrap td > .bar { flex: 1; max-width: 160px; margin-left: auto !important; }
+  .clickrow:active { background: var(--row); }
+  .cardhead { margin-bottom: 2px; }
+  .modal-back { padding: 0; align-items: stretch; }
+  .modal { border-radius: 0; border: 0; min-height: 100%; padding-top: env(safe-area-inset-top); padding-bottom: env(safe-area-inset-bottom); }
+  .modal-actions { position: sticky; bottom: 0; background: var(--night); padding: 10px 0 4px; margin: 0 -2px; }
+}

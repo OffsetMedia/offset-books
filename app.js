@@ -790,6 +790,16 @@
     onMount && onMount(m);
     var first = m.querySelector('input,select,textarea'); if (first && window.innerWidth > 800) first.focus();
   }
+  /** Copies each column heading onto its cells, so phone CSS can show tables as stacked rows. */
+  function labelTables(root) {
+    if (!root) return;
+    Array.prototype.forEach.call(root.querySelectorAll('table'), function (t) {
+      var heads = Array.prototype.map.call(t.querySelectorAll('thead th'), function (th) { return th.textContent.trim(); });
+      Array.prototype.forEach.call(t.querySelectorAll('tbody tr'), function (tr) {
+        Array.prototype.forEach.call(tr.children, function (td, i) { if (heads[i]) td.setAttribute('data-label', heads[i]); });
+      });
+    });
+  }
   function closeModal() { var m = $('modal'); if (m) m.remove(); document.body.classList.remove('noscroll'); }
 
   function field(label, html, cls) { return '<label class="field' + (cls ? ' ' + cls : '') + '"><span>' + esc(label) + '</span>' + html + '</label>'; }
@@ -1174,6 +1184,7 @@
     var so = $('btn-signout'); if (so) so.addEventListener('click', signOut);
     bindFilters();
     bindUpload();
+    labelTables($('view'));
     window.scrollTo(0, keepScroll ? y : 0);
   }
 
