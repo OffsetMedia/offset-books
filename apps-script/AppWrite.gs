@@ -951,8 +951,10 @@ function obwSaveShoot_(user, args) {
       t.sh.appendRow(obwRowArray_(t, next));
       obwAudit_(user, 'Shoots', next.id, '(new row)', '', JSON.stringify(next), 'Added in app');
     }
-    return { shoot: obwStrip_(next, t.headers), renamed: renamed, renamed_to: next.name };
+    var out = { shoot: obwStrip_(next, t.headers), renamed: renamed, renamed_to: next.name };
   } finally { lock.releaseLock(); }
+  out.project = obwSyncProject_(user, out.shoot.project);
+  return out;
 }
 
 /** Deletes a shoot. Its cost lines keep their shoot name, so nothing in the books changes. */
@@ -964,8 +966,9 @@ function obwDeleteShoot_(user, args) {
     if (!r) throw obwErr_('Shoot not found.');
     obwAudit_(user, 'Shoots', id, '(deleted)', JSON.stringify(obwStrip_(r, t.headers)), '', 'Deleted in app');
     t.sh.deleteRow(r._row);
-    return { id: id };
+    var pid = r.project;
   } finally { lock.releaseLock(); }
+  return { id: id, project: obwSyncProject_(user, pid) };
 }
 
 /**
@@ -995,17 +998,37 @@ function obwPlanShoots_(user, args) {
       t.sh.getRange(t.sh.getLastRow() + 1, 1, rows.length, t.headers.length).setValues(rows);
       out.forEach(function (s) { obwAudit_(user, 'Shoots', s.id, '(new row)', '', JSON.stringify(s), 'Planned in app'); });
     }
-    return { shoots: out.map(function (s) { return obwStrip_(s, t.headers); }) };
+    var res = { shoots: out.map(function (s) { return obwStrip_(s, t.headers); }) };
   } finally { lock.releaseLock(); }
+  res.project = obwSyncProject_(user, o.project);
+  return res;
+}
+
+/**
+ * Keeps the project in step with its shoots: agreed fee = total shoot income (linked invoice, else planned fee),
+ * budget per cost type = total of shoot budgets. Only fields the shoots actually fill are changed.
+ */
+function obwSyncProject_(user, pid) {
+  if (!pid) return null;
+  var shoots = obwShootTable_().rows.filter(function (r) { return r.id && r.project === pid; });
+  if (!shoots.length) return null;
+  var inv = {}; obwTable_('Invoices').rows.forEach(function (i) { if (i.number) inv[i.number] = i; });
+  var patch = { id: pid }, income = 0, any = false;
+  shoots.forEach(function (r) { var i = inv[r.invoice_no]; income += i ? obwNum_(i.total) - obwNum_(i.advance_applied) : obwNum_(r.fee); });
+  if (income > 0) { patch.agreed_fee = Math.round(income * 100) / 100; any = true; }
+  var hasBudget = shoots.some(function (r) { return OBW_SHOOT_BUDGETS.some(function (f) { return obwNum_(r[f]); }); });
+  if (hasBudget) {
+    OBW_SHOOT_BUDGETS.forEach(function (f) { var sum = shoots.reduce(function (t, r) { return t + obwNum_(r[f]); }, 0); patch[f] = sum ? Math.round(sum * 100) / 100 : ''; });
+    any = true;
+  }
+  return any ? obwSaveProject_(user, [patch, 'Updated from shoots']) : null;
 }
 
 /** Sets the project's budget (per cost type) to the total of its shoots' budgets. */
 function obwShootsToBudget_(user, args) {
   obwRequireAdmin_(user);
-  var pid = String(args[0] || ''), shoots = obwShootTable_().rows.filter(function (r) { return r.project === pid; });
-  if (!shoots.length) throw obwErr_('This project has no shoots yet.');
-  var patch = { id: pid };
-  OBW_SHOOT_BUDGETS.forEach(function (f) { var sum = shoots.reduce(function (t, r) { return t + obwNum_(r[f]); }, 0); patch[f] = sum ? Math.round(sum * 100) / 100 : ''; });
-  var p = obwSaveProject_(user, [patch, 'Budget set from shoots']);
+  var pid = String(args[0] || '');
+  var p = obwSyncProject_(user, pid);
+  if (!p) throw obwErr_('This project has no shoots with amounts yet.');
   return { project: p };
 }

@@ -388,6 +388,7 @@
   var shoots = { list: [], loaded: false };
   var SB = [['Equipment rental', 'budget_equipment_rental'], ['Crew / freelancer', 'budget_crew'], ['Transport', 'budget_transport'], ['Food', 'budget_food'], ['Location & venue', 'budget_location'], ['Other', 'budget_other']];
   var SSTATUS = ['planned', 'shot', 'invoiced', 'done'];
+  function applyProject(p) { if (p && p.id) DATA.projects = DATA.projects.map(function (x) { return x.id === p.id ? Object.assign({}, x, p) : x; }); }
   function key(v) { return String(v || '').trim().toLowerCase(); }
   function loadShoots() { api('obwShoots', []).then(function (l) { shoots.list = l || []; shoots.loaded = true; if (state.view === 'project') go('project'); }, function () { shoots.loaded = true; }); }
   function shootsOf(pid) { return shoots.list.filter(function (x) { return x.project === pid; }).sort(function (a, b) { return String(a.date || '9999').localeCompare(String(b.date || '9999')) || String(a.id).localeCompare(String(b.id)); }); }
@@ -423,8 +424,9 @@
     h += '<div class="tablewrap" style="border:0;background:transparent"><table class="etbl obx-stbl"><thead><tr><th>Shoot</th><th>Status</th><th class="r">Income</th><th class="r">Budget</th><th class="r">Spent</th><th>Budget used</th><th class="r">Profit</th></tr></thead><tbody>' + rows +
       (untagged.length ? '<tr class="obx-untag"><td class="name"><b>Not tagged to a shoot</b><small>' + untagged.length + ' cost line' + (untagged.length === 1 ? '' : 's') + '</small></td><td></td><td></td><td></td><td class="r num">' + m0(untaggedAmt) + '</td><td></td><td></td></tr>' : '') +
       '<tr class="obx-total"><td><b>Total</b></td><td></td><td class="r num"><b>' + m0(tf) + '</b></td><td class="r num"><b>' + m0(tb) + '</b></td><td class="r num"><b>' + m0(ts + untaggedAmt) + '</b></td><td></td><td class="r num ' + (tf - ts - untaggedAmt < 0 ? 'neg' : '') + '"><b>' + m0(tf - ts - untaggedAmt) + '</b></td></tr></tbody></table></div>';
-    var pb = SB.reduce(function (t, b) { return t + n_(p[b[1]]); }, 0);
-    if (ad && tb && Math.round(tb) !== Math.round(pb)) h += '<div class="btnrow obx-budgetnote"><span class="note">Shoot budgets add up to <b>' + m0(tb) + '</b>; the project budget is <b>' + (pb ? m0(pb) : 'not set') + '</b>.</span><button class="btn obx-sm" data-obx="shoot-budget" data-pid="' + e_(p.id) + '">Use shoot totals as the project budget</button></div>';
+    h += '<p class="note" style="margin-top:10px">The project\'s agreed fee and budget follow these shoots: fee = total income, budget = total of shoot budgets.</p>';
+    var pf = n_(p.agreed_fee);
+    if (ad && tf && Math.round(tf) !== Math.round(pf)) h += '<div class="btnrow obx-budgetnote"><span class="note">Agreed fee shows <b>' + m0(pf) + '</b> but the shoots add up to <b>' + m0(tf) + '</b>.</span><button class="btn obx-sm" data-obx="shoot-budget" data-pid="' + e_(p.id) + '">Update now</button></div>';
     if (p.budget_url) h += '<p class="note" style="margin-top:8px">Older budget sheet: <a class="link" href="' + e_(p.budget_url) + '" target="_blank" rel="noopener" style="color:var(--link)">open in Sheets</a></p>';
     return h + '</div>';
   };
@@ -458,7 +460,7 @@
         var b = ev.target.closest('[data-s=del]'); if (!b) return;
         if (b.getAttribute('data-armed') !== '1') { b.setAttribute('data-armed', '1'); b.textContent = 'Tap again to delete'; return; }
         b.disabled = true;
-        api('obwDeleteShoot', [x.id]).then(function () { shoots.list = shoots.list.filter(function (s) { return s.id !== x.id; }); closeM(); go('project'); say('Shoot deleted. Its costs keep their shoot name.', true); }, function (e) { b.disabled = false; say(e.message); });
+        api('obwDeleteShoot', [x.id]).then(function (r) { applyProject(r && r.project); shoots.list = shoots.list.filter(function (s) { return s.id !== x.id; }); closeM(); rerender(); say('Shoot deleted. Its costs keep their shoot name.', true); }, function (e) { b.disabled = false; say(e.message); });
       });
       f.addEventListener('submit', function (ev) {
         ev.preventDefault();
@@ -470,7 +472,7 @@
         if (!isNew) payload.id = x.id;
         var btn = f.querySelector('button[type=submit]'); btn.disabled = true; btn.textContent = 'Saving…';
         api('obwSaveShoot', [payload]).then(function (r) {
-          shoots.list = shoots.list.filter(function (s) { return s.id !== r.shoot.id; }).concat([r.shoot]);
+          shoots.list = shoots.list.filter(function (s) { return s.id !== r.shoot.id; }).concat([r.shoot]); applyProject(r.project);
           (r.renamed || []).forEach(function (id) { var e = findEntry(id); if (e) e.shoot = r.renamed_to; });
           closeM(); rerender(); say(isNew ? 'Shoot added' : 'Shoot saved' + (r.renamed && r.renamed.length ? '; renamed on ' + r.renamed.length + ' cost line' + (r.renamed.length === 1 ? '' : 's') : ''), true);
         }, function (e) { btn.disabled = false; btn.textContent = isNew ? 'Add shoot' : 'Save'; $('obx-err').textContent = e.message; });
@@ -511,7 +513,7 @@
         var list = l.map(function (x) { return Object.assign({ name: x.name, date: x.date, fee: d.fee === '' ? '' : n_(d.fee) }, bud); });
         var btn = f.querySelector('button[type=submit]'); btn.disabled = true; btn.textContent = 'Creating…';
         api('obwPlanShoots', [{ project: pid, shoots: list }]).then(function (r) {
-          shoots.list = shoots.list.concat(r.shoots); closeM(); go('project'); say(r.shoots.length + ' shoot' + (r.shoots.length === 1 ? '' : 's') + ' created', true);
+          shoots.list = shoots.list.concat(r.shoots); applyProject(r.project); closeM(); rerender(); say(r.shoots.length + ' shoot' + (r.shoots.length === 1 ? '' : 's') + ' created', true);
         }, function (e) { btn.disabled = false; btn.textContent = 'Create shoots'; $('obx-err').textContent = e.message; });
       });
     });
@@ -526,7 +528,7 @@
     if (!list.length) return;
     if (btn) btn.disabled = true;
     api('obwPlanShoots', [{ project: pid, shoots: list.map(function (x) { return { name: x.name, date: x.date, status: 'shot' }; }) }]).then(function (r) {
-      shoots.list = shoots.list.concat(r.shoots); go('project'); say(r.shoots.length + ' shoot' + (r.shoots.length === 1 ? '' : 's') + ' added from your costs. Add their budgets next.', true);
+      shoots.list = shoots.list.concat(r.shoots); applyProject(r.project); rerender(); say(r.shoots.length + ' shoot' + (r.shoots.length === 1 ? '' : 's') + ' added from your costs. Add their budgets next.', true);
     }, function (e) { if (btn) btn.disabled = false; say(e.message); });
   }
 
