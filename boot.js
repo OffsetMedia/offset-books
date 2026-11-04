@@ -103,7 +103,8 @@
       clearTimeout(slow);
       window.__OB_BOOT__ = d;
       attachShim();
-      return loadScript('extras.js').then(function () { return loadScript('legacy.js'); });
+      var v = '?v=' + encodeURIComponent(window.OB_BUILD || Date.now());
+      return loadScript('extras.js' + v).then(function () { return loadScript('legacy.js' + v); });
     }).then(function () {
       st.booted = true; st.booting = false; screen('app');
       $('shell').hidden = false;
@@ -133,7 +134,7 @@
     if (document.visibilityState !== 'visible' || ver.shown) return;
     fetch('version.json?t=' + Date.now(), { cache: 'no-store' }).then(function (r) { return r.ok ? r.json() : null; }).then(function (v) {
       if (!v || !v.version) return;
-      if (!ver.loaded) { ver.loaded = v.version; return; }
+      if (!ver.loaded) ver.loaded = window.OB_BUILD || v.version;
       if (v.version !== ver.loaded) showUpdate();
     }, function () { /* offline */ });
   }
