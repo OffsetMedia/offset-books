@@ -442,6 +442,7 @@ function vSettings(){
   var s=Object.keys(DATA.settings).map(function(k){return '<tr><td>'+esc(k)+'</td><td>'+esc(DATA.settings[k])+'</td></tr>';}).join('');
   var u=(DATA.users||[]).map(function(x){return '<tr><td>'+esc(x.email)+'</td><td>'+esc(x.name)+'</td><td>'+esc(x.role)+'</td></tr>';}).join('');
   return '<div class="head"><div><span class="mono">Admin</span><h1>Settings</h1></div></div>'+
+   '<div class="sec"><h3>Appearance</h3><div class="card" style="display:flex;justify-content:space-between;align-items:center;gap:14px;flex-wrap:wrap"><span class="note">Theme for this device</span>'+OBX.themeSeg()+'</div></div>'+
    '<div class="sec"><h3>Accountant mirror</h3>'+(mirrorLine()||'<p class="note">Not available.</p>')+'</div>'+
    '<div class="sec"><h3>Users</h3><div class="tablewrap"><table class="fit"><thead><tr><th>Email</th><th>Name</th><th>Role</th></tr></thead><tbody>'+u+'</tbody></table></div></div>'+
    '<div class="sec"><h3>Settings</h3><div class="tablewrap"><table class="fit kv"><tbody>'+s+'</tbody></table></div></div>'+
