@@ -363,7 +363,7 @@ function vProject(){
   function kpi(label,val,note,extra){return '<div class="kpi card '+(extra||'')+'"><span class="mono">'+label+'</span><span class="big num '+(label==='Profit'?sgn(s.profit):'')+'">'+val+'</span><span class="sub" style="margin:0">'+note+'</span></div>';}
 
   return '<a class="back" data-view="projects" tabindex="0">&lsaquo; All projects</a>'+
-    '<div class="head"><div><span class="mono">'+esc(meta.join(' · '))+'</span><h1 style="font-size:60px;font-weight:900;line-height:.9">'+esc(p.name)+'</h1></div><div style="display:flex;gap:10px;align-items:center;flex-wrap:wrap">'+statusCtl+(ROLE==='admin'?'<button class="btn" data-act="pj-edit" data-id="'+esc(p.id)+'">Edit project</button><button class="btn primary" data-act="new-inv" data-project="'+esc(p.id)+'">New invoice</button>':'')+'</div></div>'+
+    '<div class="head"><div><span class="mono">'+esc(meta.join(' · '))+'</span><h1 style="font-size:60px;font-weight:900;line-height:.9">'+esc(p.name)+'</h1></div><div style="display:flex;gap:10px;align-items:center;flex-wrap:wrap">'+statusCtl+(ROLE==='admin'?'<button class="btn" data-act="pj-edit" data-id="'+esc(p.id)+'">Edit project</button><button class="btn" data-act="new-qt" data-project="'+esc(p.id)+'">New quote</button><button class="btn primary" data-act="new-inv" data-project="'+esc(p.id)+'">New invoice</button>':'')+'</div></div>'+
     '<div class="grid g5">'+
       kpi('Agreed fee',fee?fmt(fee):'-',feeNote)+
       kpi('Invoiced',fmt(s.invoiced),s.ninv+(s.ninv===1?' invoice':' invoices'))+
@@ -371,8 +371,8 @@ function vProject(){
       kpi('Costs',fmt(s.costs),s.missing?s.missing+(s.missing===1?' document missing':' documents missing'):'All documents in')+
       kpi('Profit',fmt(s.profit),s.invoiced?Math.round(s.margin*100)+'% of invoiced':'Nothing invoiced yet','profit')+
     '</div>'+
-    '<div class="grid g2">'+
-      budgetPanel(p,s)+'<div class="panel"><span class="h2big">Budget against spend</span>'+(brows||'<div class="note">No budget set and nothing spent.</div>')+'</div>'+
+    OBX.shootsPanel(p,s)+
+    '<div class="grid g2">'+'<div class="panel"><span class="h2big">Budget against spend</span>'+(brows||'<div class="note">No budget set and nothing spent.</div>')+'</div>'+
       '<div class="panel"><span class="h2big">Invoices</span>'+irows+'</div>'+
     '</div>'+
     '<div class="panel" style="padding:6px 0 4px;gap:0"><div style="display:flex;flex-wrap:wrap;justify-content:space-between;align-items:center;gap:10px;padding:14px 22px"><span class="h2big">Costs</span>'+
@@ -818,7 +818,7 @@ function doAct(act,el){
   var type=state.dtype, no=state.dno, d=curDoc();
   switch(act){
     case 'new-inv': startNew('invoice',{project:attr('data-project')||''}); break;
-    case 'new-qt': startNew('quote'); break;
+    case 'new-qt': startNew('quote',{project:attr('data-project')||''}); break;
     case 'edit': startEdit(type,no); break;
     case 'ed-cancel': var e0=state.ed; state.ed=null; if(e0&&e0.number){state.dtype=e0.type;state.dno=e0.number;go('doc');} else go('docs'); break;
     case 'ed-add': state.ed.lines.push(newLine()); go('edit'); break;
@@ -859,7 +859,7 @@ function doAct(act,el){
       call('quoteAction',[no,act],function(){go('doc');},act==='approve'?'Quote approved':(act==='decline'?'Quote declined':'Reopened')); break;
     case 'convert':
       call('convertQuote',[no],function(res){state.dtype='invoice';state.dno=res.invoice.number;go('doc');},'Invoice draft created. Check it, then send.'); break;
-    case 'new-entry': openEntryForm({mode:ROLE==='admin'?'direct':'submit',project:attr('data-project')||''}); break;
+    case 'new-entry': openEntryForm({mode:ROLE==='admin'?'direct':'submit',project:attr('data-project')||'',shoot:attr('data-shoot')||''}); break;
     case 'en-kind': var mk=state.modal; if(mk&&mk.e){mk.e.kind=attr('data-v');mk.e.cost_type=mk.e.kind==='income'?'':mk.e.cost_type;mk.e.account='';mk.dupAsk=null;renderModal();} break;
     case 'en-save': enSave(); break;
     case 'en-rmfile': if(state.modal){state.modal.file=null;renderModal();} break;
@@ -1033,7 +1033,7 @@ function openEntryForm(o){
     var a0=String(src.account||''); if(a0&&a0!==autoAccount(e)) e.account=a0;
     if(e.kind==='cost'&&!e.doc_status) e.doc_status=src.doc_url?'invoice':'none';
   } else {
-    e={kind:'cost',date:TODAY,amount:'',payee:'',description:'',project:proj?proj.id:'',shoot:'',cost_type:'',account:'',business_line:proj&&proj.business_line?proj.business_line:'Production',
+    e={kind:'cost',date:TODAY,amount:'',payee:'',description:'',project:proj?proj.id:'',shoot:o.shoot||'',cost_type:'',account:'',business_line:proj&&proj.business_line?proj.business_line:'Production',
       paid_status:'paid',paid_date:'',paid_amount:'',payment_method:'Bank transfer',doc_status:'none',doc_number:'',notes:''};
   }
   openModal({kind:'entry',mode:o.mode||'direct',id:o.entry?o.entry.id:(o.item?o.item.id:''),e:e,file:null,existing:src?String(src.doc_url||''):'',dupAsk:null,
@@ -1073,7 +1073,7 @@ function entryBody(m){
   h+='<div class="frow"><div class="fld"><label for="en-payee">'+(cost?'Paid to':'Received from')+'</label><input class="f" list="enpay" id="en-payee" data-en="payee" value="'+esc(e.payee)+'" placeholder="'+(cost?'Supplier or person':'Client')+'" autocomplete="off"></div>'+
      '<div class="fld"><label for="en-description">What for</label><input class="f" id="en-description" data-en="description" value="'+esc(e.description)+'" placeholder="e.g. Lens hire, 2 days"></div></div>';
   h+='<div class="frow"><div class="fld"><label for="en-project">Project</label><select class="f" id="en-project" data-en="project">'+selHtml(projs,e.project,'No project (company overhead)')+'</select></div>'+
-     (e.project?'<div class="fld"><label for="en-shoot">Shoot day (optional)</label><input class="f" id="en-shoot" data-en="shoot" value="'+esc(e.shoot)+'" placeholder="e.g. S1"></div>':'<div class="fld"><label for="en-business_line">Business line</label><select class="f" id="en-business_line" data-en="business_line">'+selHtml(['Production','AI data'],e.business_line)+'</select></div>')+'</div>';
+     (e.project?'<div class="fld"><label for="en-shoot">Shoot day (optional)</label><input class="f" id="en-shoot" data-en="shoot" value="'+esc(e.shoot)+'" placeholder="Pick or type a shoot" list="obx-dl-shoots" autocomplete="off">'+OBX.shootDatalist(e.project)+'</div>':'<div class="fld"><label for="en-business_line">Business line</label><select class="f" id="en-business_line" data-en="business_line">'+selHtml(['Production','AI data'],e.business_line)+'</select></div>')+'</div>';
   if(cost) h+='<div class="frow"><div class="fld"><label for="en-cost_type">Cost type</label><select class="f" id="en-cost_type" data-en="cost_type">'+selHtml(types,e.cost_type,'Choose a type')+'</select></div>'+
      '<div class="fld"><label for="en-account">Books account</label><select class="f" id="en-account" data-en="account">'+selHtml(accs,e.account,'Automatic: '+accName(autoAccount(e)))+'</select></div></div>';
   else h+='<div class="frow"><div class="fld"><label for="en-account">Books account</label><select class="f" id="en-account" data-en="account">'+selHtml(accs,e.account,'Automatic: '+accName(autoAccount(e)))+'</select></div>'+

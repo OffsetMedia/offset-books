@@ -29,7 +29,12 @@ var OBW_ACTIONS = {
   obwBillFile: obwBillFile_,
   obwInbox: obwInbox_,
   obwRunAudit: obwRunAudit_,
-  obwInboxAction: obwInboxAction_
+  obwInboxAction: obwInboxAction_,
+  obwShoots: obwShoots_,
+  obwSaveShoot: obwSaveShoot_,
+  obwDeleteShoot: obwDeleteShoot_,
+  obwPlanShoots: obwPlanShoots_,
+  obwShootsToBudget: obwShootsToBudget_
 };
 
 // Fields the app may write. Anything else in a request is ignored.
@@ -885,4 +890,122 @@ function obwInboxAction_(user, args) {
     throw obwErr_('Message not found.');
   }
   throw obwErr_('Unknown action.');
+}
+
+
+/* ================= shoots (work days inside a project, each with its own budget) ================= */
+
+var OBW_SHOOT_BUDGETS = ['budget_equipment_rental', 'budget_crew', 'budget_transport', 'budget_food', 'budget_location', 'budget_other'];
+var OBW_SHOOT_COLS = ['id', 'project', 'name', 'date', 'status', 'fee', 'invoice_no'].concat(OBW_SHOOT_BUDGETS).concat(['notes', 'created_at']);
+var OBW_SHOOT_NUM = { fee: 1, budget_equipment_rental: 1, budget_crew: 1, budget_transport: 1, budget_food: 1, budget_location: 1, budget_other: 1 };
+
+function obwShootTable_() {
+  var ss = obwSs_(), sh = ss.getSheetByName('Shoots');
+  if (!sh) { sh = ss.insertSheet('Shoots'); sh.getRange(1, 1, 1, OBW_SHOOT_COLS.length).setValues([OBW_SHOOT_COLS]); sh.setFrozenRows(1); }
+  var t = obwTable_('Shoots'); obwEnsureCols_(t, OBW_SHOOT_COLS); return t;
+}
+function obwShootClean_(f, v) {
+  if (OBW_SHOOT_NUM[f]) { if (v === '' || v == null) return ''; var n = Number(String(v).replace(/,/g, '')); if (!isFinite(n)) throw obwErr_(f + ' must be a number.'); return Math.round(n * 100) / 100; }
+  return v == null ? '' : String(v).trim();
+}
+function obwShootKey_(name) { return String(name || '').trim().toLowerCase(); }
+
+/** All shoots (everyone can read; only the admin edits). */
+function obwShoots_(user) {
+  var t = obwShootTable_();
+  return t.rows.filter(function (r) { return r.id; }).map(obwPublic_);
+}
+
+/** Adds (no id) or updates a shoot. Renaming a shoot also renames it on that project's cost lines. */
+function obwSaveShoot_(user, args) {
+  obwRequireAdmin_(user);
+  var input = args[0] || {};
+  var lock = obwLock_();
+  try {
+    var t = obwShootTable_(), ex = null;
+    if (input.id) { ex = t.rows.filter(function (r) { return String(r.id) === String(input.id); })[0]; if (!ex) throw obwErr_('Shoot not found. Refresh and try again.'); }
+    var next = ex ? obwStrip_(ex, t.headers) : { status: 'planned' };
+    ['project', 'name', 'date', 'status', 'fee', 'invoice_no', 'notes'].concat(OBW_SHOOT_BUDGETS).forEach(function (f) { if (Object.prototype.hasOwnProperty.call(input, f)) next[f] = obwShootClean_(f, input[f]); });
+    if (!next.project) throw obwErr_('A shoot needs a project.');
+    if (!next.name) throw obwErr_('Give the shoot a name, e.g. Match day 1.');
+    if (next.date && !/^\d{4}-\d{2}-\d{2}$/.test(next.date)) throw obwErr_('Date must be YYYY-MM-DD.');
+    var clash = t.rows.some(function (r) { return r.id && String(r.id) !== String(next.id || '') && r.project === next.project && obwShootKey_(r.name) === obwShootKey_(next.name); });
+    if (clash) throw obwErr_('This project already has a shoot called "' + next.name + '".');
+    var renamed = [];
+    if (ex) {
+      var changes = t.headers.filter(function (h) { return String(ex[h] == null ? '' : ex[h]) !== String(next[h] == null ? '' : next[h]); });
+      if (changes.length) { obwWriteCells_(t, ex._row, next, changes); changes.forEach(function (h) { obwAudit_(user, 'Shoots', next.id, h, ex[h], next[h], 'Edited in app'); }); }
+      if (obwShootKey_(ex.name) !== obwShootKey_(next.name)) {
+        var E = obwTable_('Entries');
+        E.rows.forEach(function (e) {
+          if (e.project === next.project && obwShootKey_(e.shoot) === obwShootKey_(ex.name)) {
+            obwAssertOpen_(e.date);
+            obwWriteCells_(E, e._row, { shoot: next.name }, ['shoot']);
+            obwAudit_(user, 'Entries', e.id, 'shoot', e.shoot, next.name, 'Shoot renamed');
+            renamed.push(e.id);
+          }
+        });
+      }
+    } else {
+      next.id = obwNextId_(t.rows, 'S', 4); next.created_at = obwNow_();
+      t.sh.appendRow(obwRowArray_(t, next));
+      obwAudit_(user, 'Shoots', next.id, '(new row)', '', JSON.stringify(next), 'Added in app');
+    }
+    return { shoot: obwStrip_(next, t.headers), renamed: renamed, renamed_to: next.name };
+  } finally { lock.releaseLock(); }
+}
+
+/** Deletes a shoot. Its cost lines keep their shoot name, so nothing in the books changes. */
+function obwDeleteShoot_(user, args) {
+  obwRequireAdmin_(user);
+  var id = String(args[0] || ''), lock = obwLock_();
+  try {
+    var t = obwShootTable_(), r = t.rows.filter(function (x) { return String(x.id) === id; })[0];
+    if (!r) throw obwErr_('Shoot not found.');
+    obwAudit_(user, 'Shoots', id, '(deleted)', JSON.stringify(obwStrip_(r, t.headers)), '', 'Deleted in app');
+    t.sh.deleteRow(r._row);
+    return { id: id };
+  } finally { lock.releaseLock(); }
+}
+
+/**
+ * Creates several shoots at once. args[0] = { project, shoots: [{ name, date, fee, budget_* }] }
+ * Names already on the project are skipped.
+ */
+function obwPlanShoots_(user, args) {
+  obwRequireAdmin_(user);
+  var o = args[0] || {}, list = o.shoots || [];
+  if (!o.project) throw obwErr_('Choose the project.');
+  if (!list.length) throw obwErr_('Add at least one shoot.');
+  if (list.length > 60) throw obwErr_('That is a lot of shoots. Add up to 60 at a time.');
+  var lock = obwLock_();
+  try {
+    var t = obwShootTable_(), have = {}, out = [], num = Number(obwNextId_(t.rows, 'S', 4).slice(1)), rows = [];
+    t.rows.forEach(function (r) { if (r.project === o.project) have[obwShootKey_(r.name)] = 1; });
+    list.forEach(function (x) {
+      var name = String(x.name || '').trim(); if (!name || have[obwShootKey_(name)]) return;
+      have[obwShootKey_(name)] = 1;
+      var s = { project: o.project, name: name, status: x.status || 'planned', created_at: obwNow_() };
+      ['date', 'fee', 'invoice_no', 'notes'].concat(OBW_SHOOT_BUDGETS).forEach(function (f) { if (x[f] != null) s[f] = obwShootClean_(f, x[f]); });
+      if (s.date && !/^\d{4}-\d{2}-\d{2}$/.test(s.date)) throw obwErr_('Date must be YYYY-MM-DD.');
+      var id = String(num++); while (id.length < 4) id = '0' + id; s.id = 'S' + id;
+      rows.push(obwRowArray_(t, s)); out.push(s);
+    });
+    if (rows.length) {
+      t.sh.getRange(t.sh.getLastRow() + 1, 1, rows.length, t.headers.length).setValues(rows);
+      out.forEach(function (s) { obwAudit_(user, 'Shoots', s.id, '(new row)', '', JSON.stringify(s), 'Planned in app'); });
+    }
+    return { shoots: out.map(function (s) { return obwStrip_(s, t.headers); }) };
+  } finally { lock.releaseLock(); }
+}
+
+/** Sets the project's budget (per cost type) to the total of its shoots' budgets. */
+function obwShootsToBudget_(user, args) {
+  obwRequireAdmin_(user);
+  var pid = String(args[0] || ''), shoots = obwShootTable_().rows.filter(function (r) { return r.project === pid; });
+  if (!shoots.length) throw obwErr_('This project has no shoots yet.');
+  var patch = { id: pid };
+  OBW_SHOOT_BUDGETS.forEach(function (f) { var sum = shoots.reduce(function (t, r) { return t + obwNum_(r[f]); }, 0); patch[f] = sum ? Math.round(sum * 100) / 100 : ''; });
+  var p = obwSaveProject_(user, [patch, 'Budget set from shoots']);
+  return { project: p };
 }

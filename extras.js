@@ -145,14 +145,14 @@
     billForm(group, null);
   };
 
-  function billForm(existing, rv, idx, count) {
+  function billForm(existing, rv, idx, count, preset) {
     existing = existing || [];
     var s = rv ? rv._s : null, first = existing[0] || {}, total = 0;
     existing.forEach(function (x) { total += n_(x.amount); });
     var hdr = { date: today(), payee: '', doc_number: '', notes: '', payment_method: 'Bank transfer', paid_status: 'paid', paid_date: today(), doc_url: '' };
     if (existing.length) hdr = { date: first.date, payee: first.payee, doc_number: first.doc_number || '', notes: first.notes || '', payment_method: first.payment_method || 'Bank transfer', paid_status: first.paid_status || 'paid', paid_date: first.paid_date || '', doc_url: first.doc_url || '' };
     var lines = existing.length ? existing.map(function (x) { return { project: x.project, shoot: x.shoot, cost_type: x.cost_type || 'Equipment rental', description: x.description, amount: n_(x.amount) }; })
-      : [{ project: state.view === 'project' ? state.pid : '', shoot: '', cost_type: 'Equipment rental', description: '', amount: '' }];
+      : [{ project: preset ? preset.project : (state.view === 'project' ? state.pid : ''), shoot: preset ? preset.shoot : '', cost_type: 'Equipment rental', description: '', amount: '' }];
     if (existing.length === 1 && !first.bill_id) lines.push({ project: '', shoot: '', cost_type: lines[0].cost_type, description: lines[0].description, amount: '' });
     var payments = [], dupes = [];
     if (s) {
@@ -179,7 +179,7 @@
       '<div class="obx-sum" id="obx-sum"></div><p class="obx-err" id="obx-err" role="alert"></p>' +
       '<div class="btnrow obx-actions">' + (s ? '<button type="button" class="btn obx-danger" data-l="reject">Reject</button><button type="button" class="btn" data-l="skip">Skip</button>' : '') +
       '<span style="flex:1"></span><button type="button" class="btn" data-obx="close">' + (s ? 'Close' : 'Cancel') + '</button><button type="submit" class="btn primary" id="obx-save">' + (s ? 'Approve' : 'Save bill') + '</button></div>' +
-      dl('obx-dl-payees', payees()) + '</form>';
+      dl('obx-dl-payees', payees()) + dl('obx-dl-allshoots', uniq(shoots.list.map(function (x) { return x.name; }))) + '</form>';
     var title = s ? 'Review bill ' + (idx + 1) + ' of ' + count : (existing.length ? (first.bill_id ? 'Edit split bill' : 'Split ' + first.id + ' across projects') : 'Split bill');
     var pane = s ? '<div class="obx-doc"><div class="obx-frame" id="obx-frame"><span class="note">Loading the document…</span></div><a class="note" href="' + e_(s.file_url) + '" target="_blank" rel="noopener" style="color:var(--link)">Open in Drive</a></div>' : '';
     openM(title, s ? '<div class="obx-review">' + pane + '<div>' + body + '</div></div>' : body, !!s, function (m) {
@@ -193,7 +193,7 @@
       function draw() {
         box.innerHTML = lines.map(function (l, i) {
           return '<div class="obx-line"><div class="obx-r2">' + fld('Project', '<select name="l_project">' + projOptions(l.project) + '</select>') + fld('Amount', inp('l_amount', l.amount, 'inputmode="decimal" placeholder="0"')) + '</div>' +
-            '<div class="obx-r3">' + fld('Cost type', '<select name="l_cost_type">' + opts(costTypes(), l.cost_type) + '</select>') + fld('Shoot / day', inp('l_shoot', l.shoot)) + fld('What for', inp('l_description', l.description)) + '</div>' +
+            '<div class="obx-r3">' + fld('Cost type', '<select name="l_cost_type">' + opts(costTypes(), l.cost_type) + '</select>') + fld('Shoot / day', inp('l_shoot', l.shoot, 'list="obx-dl-allshoots" autocomplete="off"')) + fld('What for', inp('l_description', l.description)) + '</div>' +
             (l.reason ? '<p class="obx-reason">Claude: ' + e_(l.reason) + '</p>' : '') +
             (lines.length > 1 ? '<button type="button" class="obx-rm" data-rm="' + i + '">Remove line</button>' : '') + '</div>';
         }).join('');
@@ -325,6 +325,7 @@
   }
   OBX.start = function () {
     if (admin()) loadInbox();
+    loadShoots();
     document.body.classList.add('obx-ready');
   };
   OBX.afterStatement = function () { runCheck('statement'); };
@@ -382,11 +383,176 @@
     else if (a.type === 'settings') go('settings');
   }
 
+
+  /* ---------- shoots: work days inside a project, each with its own budget ---------- */
+  var shoots = { list: [], loaded: false };
+  var SB = [['Equipment rental', 'budget_equipment_rental'], ['Crew / freelancer', 'budget_crew'], ['Transport', 'budget_transport'], ['Food', 'budget_food'], ['Location & venue', 'budget_location'], ['Other', 'budget_other']];
+  var SSTATUS = ['planned', 'shot', 'invoiced', 'done'];
+  function key(v) { return String(v || '').trim().toLowerCase(); }
+  function loadShoots() { api('obwShoots', []).then(function (l) { shoots.list = l || []; shoots.loaded = true; if (state.view === 'project') go('project'); }, function () { shoots.loaded = true; }); }
+  function shootsOf(pid) { return shoots.list.filter(function (x) { return x.project === pid; }).sort(function (a, b) { return String(a.date || '9999').localeCompare(String(b.date || '9999')) || String(a.id).localeCompare(String(b.id)); }); }
+  function sBudget(x) { return SB.reduce(function (t, b) { return t + n_(x[b[1]]); }, 0); }
+  function sCosts(pid, name) { var k = key(name); return (DATA.entries || []).filter(function (e) { return e.kind === 'cost' && e.project === pid && key(e.shoot) === k && String(e.account) !== '1400'; }); }
+  function invoiceOf(no) { return no ? (DATA.invoices || []).filter(function (i) { return i.number === no; })[0] : null; }
+  OBX.shootDatalist = function (pid) { return dl('obx-dl-shoots', shootsOf(pid).map(function (x) { return x.name; })); };
+
+  OBX.shootsPanel = function (p) {
+    var list = shootsOf(p.id), ad = admin(), names = {};
+    list.forEach(function (x) { names[key(x.name)] = 1; });
+    var projCosts = (DATA.entries || []).filter(function (e) { return e.kind === 'cost' && e.project === p.id && String(e.account) !== '1400'; });
+    var untagged = projCosts.filter(function (e) { return !names[key(e.shoot)]; }), untaggedAmt = untagged.reduce(function (t, e) { return t + n_(e.amount); }, 0);
+    var fromCosts = uniq(projCosts.map(function (e) { return e.shoot; }).filter(function (v) { return v && !names[key(v)]; }));
+    var h = '<div class="panel obx-shoots"><div class="obx-sechead"><div><span class="h2big">Shoots</span><div class="note">Each shoot or work day with its own budget. Costs count towards a shoot when their "Shoot day" matches.</div></div>' +
+      (ad ? '<div class="btnrow">' + (list.length ? '' : '<button class="btn primary" data-obx="shoot-plan" data-pid="' + e_(p.id) + '">Plan shoots</button>') + '<button class="btn' + (list.length ? ' primary' : '') + '" data-obx="shoot-add" data-pid="' + e_(p.id) + '">+ Shoot</button></div>' : '') + '</div>';
+    if (!shoots.loaded) return h + '<div class="note">Loading shoots…</div></div>';
+    if (ad && fromCosts.length) h += '<button class="obx-banner" data-obx="shoot-import" data-pid="' + e_(p.id) + '"><span class="tag info">From costs</span><span>Your costs already mention <b>' + fromCosts.length + ' shoot' + (fromCosts.length === 1 ? '' : 's') + '</b>: ' + e_(fromCosts.slice(0, 6).join(', ')) + (fromCosts.length > 6 ? '…' : '') + '.</span><span class="obx-go">Add them ›</span></button>';
+    if (!list.length) return h + '<div class="note" style="padding:6px 0 2px">No shoots yet. Plan them to give each match day, profile shoot or event its own budget.</div></div>';
+    var tb = 0, ts = 0, tf = 0;
+    var rows = list.map(function (x) {
+      var b = sBudget(x), spent = sCosts(p.id, x.name).reduce(function (t, e) { return t + n_(e.amount); }, 0), inv = invoiceOf(x.invoice_no);
+      var income = inv ? n_(inv.total) - n_(inv.advance_applied) : n_(x.fee);
+      tb += b; ts += spent; tf += income;
+      var r = b ? spent / b : 0, color = !b ? 'var(--muted2)' : spent > b ? 'var(--over)' : r >= 0.85 ? 'var(--warn)' : 'var(--good)';
+      return '<tr class="click" data-obxshoot="' + e_(x.id) + '" tabindex="0"><td class="name"><b>' + e_(x.name) + '</b><small>' + e_(x.date || 'No date') + '</small></td>' +
+        '<td><span class="tag ' + ({ planned: 'info', shot: 'warn', invoiced: 'good', done: 'mute' }[x.status] || 'mute') + '">' + e_(x.status || 'planned') + '</span></td>' +
+        '<td class="r num">' + (income ? m0(income) : '<span class="note">-</span>') + (inv ? '<small class="obx-inv">' + e_(inv.number) + ' · ' + e_(inv.status) + '</small>' : (x.fee ? '<small class="obx-inv">planned fee</small>' : '')) + '</td>' +
+        '<td class="r num">' + (b ? m0(b) : '<span class="note">-</span>') + '</td><td class="r num"><b>' + m0(spent) + '</b></td>' +
+        '<td style="min-width:120px">' + (b ? '<span class="bar"><i style="width:' + Math.min(100, Math.round(r * 100)) + '%;background:' + color + '"></i></span><small style="color:' + color + '">' + (spent > b ? m0(spent - b) + ' over' : m0(b - spent) + ' left') + '</small>' : '<small class="note">No budget</small>') + '</td>' +
+        '<td class="r num ' + (income - spent < 0 ? 'neg' : '') + '">' + (income ? m0(income - spent) : '<span class="note">-</span>') + '</td></tr>';
+    }).join('');
+    h += '<div class="tablewrap" style="border:0;background:transparent"><table class="etbl obx-stbl"><thead><tr><th>Shoot</th><th>Status</th><th class="r">Income</th><th class="r">Budget</th><th class="r">Spent</th><th>Budget used</th><th class="r">Profit</th></tr></thead><tbody>' + rows +
+      (untagged.length ? '<tr class="obx-untag"><td class="name"><b>Not tagged to a shoot</b><small>' + untagged.length + ' cost line' + (untagged.length === 1 ? '' : 's') + '</small></td><td></td><td></td><td></td><td class="r num">' + m0(untaggedAmt) + '</td><td></td><td></td></tr>' : '') +
+      '<tr class="obx-total"><td><b>Total</b></td><td></td><td class="r num"><b>' + m0(tf) + '</b></td><td class="r num"><b>' + m0(tb) + '</b></td><td class="r num"><b>' + m0(ts + untaggedAmt) + '</b></td><td></td><td class="r num ' + (tf - ts - untaggedAmt < 0 ? 'neg' : '') + '"><b>' + m0(tf - ts - untaggedAmt) + '</b></td></tr></tbody></table></div>';
+    var pb = SB.reduce(function (t, b) { return t + n_(p[b[1]]); }, 0);
+    if (ad && tb && Math.round(tb) !== Math.round(pb)) h += '<div class="btnrow obx-budgetnote"><span class="note">Shoot budgets add up to <b>' + m0(tb) + '</b>; the project budget is <b>' + (pb ? m0(pb) : 'not set') + '</b>.</span><button class="btn obx-sm" data-obx="shoot-budget" data-pid="' + e_(p.id) + '">Use shoot totals as the project budget</button></div>';
+    if (p.budget_url) h += '<p class="note" style="margin-top:8px">Older budget sheet: <a class="link" href="' + e_(p.budget_url) + '" target="_blank" rel="noopener" style="color:var(--link)">open in Sheets</a></p>';
+    return h + '</div>';
+  };
+
+  function budgetFields(x) {
+    return '<div class="obx-r3">' + SB.map(function (b) { return fld(b[0], inp(b[1], x[b[1]] === undefined ? '' : x[b[1]], 'inputmode="decimal" placeholder="0"')); }).join('') + '</div>';
+  }
+  function readBudget(d) { var o = {}; SB.forEach(function (b) { o[b[1]] = d[b[1]] === '' ? '' : n_(d[b[1]]); }); return o; }
+  function numOk(d, keys) { return keys.every(function (k) { return d[k] === '' || d[k] == null || /^-?[\d,]*\.?\d+$/.test(String(d[k])); }); }
+
+  function shootForm(pid, x) {
+    var isNew = !x; x = x || { project: pid, status: 'planned' };
+    var p = project(pid) || {}, invs = (DATA.invoices || []).filter(function (i) { return i.project === pid; });
+    var costs = isNew ? [] : sCosts(pid, x.name).sort(function (a, b) { return String(a.date).localeCompare(String(b.date)); });
+    var body = '<form class="obx-form" novalidate>' +
+      '<div class="obx-r2">' + fld('Shoot name', inp('name', x.name, 'placeholder="e.g. Match day 1"')) + fld('Date', inp('date', x.date, 'type="date"')) + '</div>' +
+      '<div class="obx-r2">' + fld('Status', '<select name="status">' + opts(SSTATUS, x.status || 'planned') + '</select>') + fld('Fee for this shoot (LKR)', inp('fee', x.fee, 'inputmode="decimal" placeholder="Planned income"')) + '</div>' +
+      fld('Invoice for this shoot', '<select name="invoice_no"><option value="">Not invoiced yet</option>' + invs.map(function (i) { return '<option value="' + e_(i.number) + '"' + (i.number === x.invoice_no ? ' selected' : '') + '>' + e_(i.number + ' · ' + m0(i.total) + ' · ' + i.status) + '</option>'; }).join('') + '</select>') +
+      '<span class="mono">Budget for this shoot</span>' + budgetFields(x) + '<div class="obx-sum" id="obx-bsum"></div>' +
+      fld('Notes', inp('notes', x.notes)) +
+      (isNew ? '' : '<span class="mono">Costs on this shoot</span>' + (costs.length ? '<div class="tablewrap"><table class="etbl"><tbody>' + costs.map(function (e) {
+        return '<tr class="click" data-obxentry="' + e_(e.id) + '"><td>' + e_(e.date) + '</td><td class="name"><b>' + e_(e.payee) + '</b><small>' + e_(e.cost_type || '') + ' · ' + e_(e.description || '') + '</small></td><td class="r num amt">' + m0(e.amount) + '</td></tr>'; }).join('') + '</tbody></table></div>' : '<p class="note">No costs tagged with this shoot yet.</p>') +
+        '<div class="btnrow"><button type="button" class="chip on" data-act="new-entry" data-project="' + e_(pid) + '" data-shoot="' + e_(x.name) + '">+ Add cost to this shoot</button><button type="button" class="chip" data-obx="shoot-split" data-shoot="' + e_(x.name) + '" data-pid="' + e_(pid) + '">+ Split a bill</button></div>') +
+      '<p class="obx-err" id="obx-err" role="alert"></p><div class="btnrow obx-actions">' + (isNew ? '' : '<button type="button" class="btn obx-danger" data-s="del">Delete shoot</button>') +
+      '<span style="flex:1"></span><button type="button" class="btn" data-obx="close">Cancel</button><button type="submit" class="btn primary">' + (isNew ? 'Add shoot' : 'Save') + '</button></div></form>';
+    openM((isNew ? 'New shoot · ' : '') + (isNew ? (p.name || '') : x.name), body, false, function (m) {
+      var f = m.querySelector('form');
+      function bs() { var d = form(f), t = SB.reduce(function (a, b) { return a + n_(d[b[1]]); }, 0); $('obx-bsum').innerHTML = 'Budget <b>' + m0(t) + '</b>' + (n_(d.fee) ? ' · planned margin <b style="color:' + (n_(d.fee) - t < 0 ? 'var(--over)' : 'var(--good)') + '">' + m0(n_(d.fee) - t) + '</b>' : ''); }
+      f.addEventListener('input', bs); bs();
+      m.addEventListener('click', function (ev) {
+        var b = ev.target.closest('[data-s=del]'); if (!b) return;
+        if (b.getAttribute('data-armed') !== '1') { b.setAttribute('data-armed', '1'); b.textContent = 'Tap again to delete'; return; }
+        b.disabled = true;
+        api('obwDeleteShoot', [x.id]).then(function () { shoots.list = shoots.list.filter(function (s) { return s.id !== x.id; }); closeM(); go('project'); say('Shoot deleted. Its costs keep their shoot name.', true); }, function (e) { b.disabled = false; say(e.message); });
+      });
+      f.addEventListener('submit', function (ev) {
+        ev.preventDefault();
+        var d = form(f), err = '';
+        if (!d.name) err = 'Give the shoot a name.'; else if (d.date && !isDate(d.date)) err = 'The date is not valid.';
+        else if (!numOk(d, ['fee'].concat(SB.map(function (b) { return b[1]; })))) err = 'Amounts must be numbers.';
+        if (err) { $('obx-err').textContent = err; return; }
+        var payload = Object.assign({ project: pid, name: d.name, date: d.date, status: d.status, fee: d.fee === '' ? '' : n_(d.fee), invoice_no: d.invoice_no, notes: d.notes }, readBudget(d));
+        if (!isNew) payload.id = x.id;
+        var btn = f.querySelector('button[type=submit]'); btn.disabled = true; btn.textContent = 'Saving…';
+        api('obwSaveShoot', [payload]).then(function (r) {
+          shoots.list = shoots.list.filter(function (s) { return s.id !== r.shoot.id; }).concat([r.shoot]);
+          (r.renamed || []).forEach(function (id) { var e = findEntry(id); if (e) e.shoot = r.renamed_to; });
+          closeM(); rerender(); say(isNew ? 'Shoot added' : 'Shoot saved' + (r.renamed && r.renamed.length ? '; renamed on ' + r.renamed.length + ' cost line' + (r.renamed.length === 1 ? '' : 's') : ''), true);
+        }, function (e) { btn.disabled = false; btn.textContent = isNew ? 'Add shoot' : 'Save'; $('obx-err').textContent = e.message; });
+      });
+    });
+  }
+
+  function planForm(pid) {
+    var p = project(pid) || {};
+    var body = '<form class="obx-form" novalidate><p class="note">Set up all the shoots at once. Every shoot starts with the same budget; change any of them afterwards, and add extra shoots any time with + Shoot.</p>' +
+      '<div class="obx-r2">' + fld('How many shoots', inp('count', 3, 'inputmode="numeric"')) + fld('Name them', inp('base', /CPL|CGL|League/i.test(p.name || '') ? 'Match day' : 'Shoot', '')) + '</div>' +
+      '<div class="obx-r2">' + fld('First shoot date (optional)', inp('first', '', 'type="date"')) + fld('Days between shoots', inp('gap', '', 'inputmode="numeric" placeholder="e.g. 7"')) + '</div>' +
+      fld('Fee per shoot (LKR, optional)', inp('fee', '', 'inputmode="decimal" placeholder="Planned income for each"')) +
+      '<span class="mono">Budget for each shoot</span>' + budgetFields({}) + '<div class="obx-sum" id="obx-psum"></div>' +
+      '<p class="obx-err" id="obx-err" role="alert"></p><div class="btnrow obx-actions"><span style="flex:1"></span><button type="button" class="btn" data-obx="close">Cancel</button><button type="submit" class="btn primary">Create shoots</button></div></form>';
+    openM('Plan shoots · ' + (p.name || ''), body, false, function (m) {
+      var f = m.querySelector('form');
+      function names(d) {
+        var c = Math.max(0, Math.min(60, Math.floor(n_(d.count)))), out = [];
+        for (var i = 1; i <= c; i++) {
+          var date = '';
+          if (isDate(d.first)) { var dt = new Date(d.first + 'T00:00:00'); dt.setDate(dt.getDate() + (i - 1) * Math.max(0, Math.floor(n_(d.gap)))); date = dt.getFullYear() + '-' + ('0' + (dt.getMonth() + 1)).slice(-2) + '-' + ('0' + dt.getDate()).slice(-2); }
+          out.push({ name: (d.base || 'Shoot') + ' ' + i, date: date });
+        }
+        return out;
+      }
+      function ps() {
+        var d = form(f), l = names(d), each = SB.reduce(function (a, b) { return a + n_(d[b[1]]); }, 0);
+        $('obx-psum').innerHTML = l.length ? 'Creates <b>' + e_(l.map(function (x) { return x.name + (x.date ? ' (' + x.date + ')' : ''); }).slice(0, 4).join(', ')) + (l.length > 4 ? '…' : '') + '</b> · total budget <b>' + m0(each * l.length) + '</b>' + (n_(d.fee) ? ' · total fees <b>' + m0(n_(d.fee) * l.length) + '</b>' : '') : 'Enter how many shoots.';
+      }
+      f.addEventListener('input', ps); ps();
+      f.addEventListener('submit', function (ev) {
+        ev.preventDefault();
+        var d = form(f), l = names(d), err = '';
+        if (!l.length) err = 'Enter how many shoots (1 to 60).'; else if (!numOk(d, ['fee'].concat(SB.map(function (b) { return b[1]; })))) err = 'Amounts must be numbers.';
+        if (err) { $('obx-err').textContent = err; return; }
+        var bud = readBudget(d);
+        var list = l.map(function (x) { return Object.assign({ name: x.name, date: x.date, fee: d.fee === '' ? '' : n_(d.fee) }, bud); });
+        var btn = f.querySelector('button[type=submit]'); btn.disabled = true; btn.textContent = 'Creating…';
+        api('obwPlanShoots', [{ project: pid, shoots: list }]).then(function (r) {
+          shoots.list = shoots.list.concat(r.shoots); closeM(); go('project'); say(r.shoots.length + ' shoot' + (r.shoots.length === 1 ? '' : 's') + ' created', true);
+        }, function (e) { btn.disabled = false; btn.textContent = 'Create shoots'; $('obx-err').textContent = e.message; });
+      });
+    });
+  }
+
+  function importShoots(pid, btn) {
+    var have = {}; shootsOf(pid).forEach(function (x) { have[key(x.name)] = 1; });
+    var first = {};
+    (DATA.entries || []).filter(function (e) { return e.kind === 'cost' && e.project === pid && e.shoot && !have[key(e.shoot)]; })
+      .forEach(function (e) { var k = key(e.shoot); if (!first[k] || e.date < first[k].date) first[k] = { name: String(e.shoot).trim(), date: String(e.date).slice(0, 10) }; });
+    var list = Object.keys(first).map(function (k) { return first[k]; });
+    if (!list.length) return;
+    if (btn) btn.disabled = true;
+    api('obwPlanShoots', [{ project: pid, shoots: list.map(function (x) { return { name: x.name, date: x.date, status: 'shot' }; }) }]).then(function (r) {
+      shoots.list = shoots.list.concat(r.shoots); go('project'); say(r.shoots.length + ' shoot' + (r.shoots.length === 1 ? '' : 's') + ' added from your costs. Add their budgets next.', true);
+    }, function (e) { if (btn) btn.disabled = false; say(e.message); });
+  }
+
+  document.addEventListener('click', function (ev) {
+    var t = ev.target; if (!t.closest) return;
+    var el = t.closest('[data-obxshoot],[data-obxentry],[data-obx^="shoot-"]'); if (!el) return;
+    ev.stopPropagation(); ev.preventDefault();
+    var a = el.getAttribute('data-obx'), pid = el.getAttribute('data-pid');
+    if (el.hasAttribute('data-obxshoot')) { var x = shoots.list.filter(function (s) { return s.id === el.getAttribute('data-obxshoot'); })[0]; if (x && admin()) shootForm(x.project, x); }
+    else if (el.hasAttribute('data-obxentry')) { closeM(); openEntry(el.getAttribute('data-obxentry')); }
+    else if (a === 'shoot-add') shootForm(pid, null);
+    else if (a === 'shoot-plan') planForm(pid);
+    else if (a === 'shoot-import') importShoots(pid, el);
+    else if (a === 'shoot-split') { var sh = el.getAttribute('data-shoot'); closeM(); billForm([], null, 0, 0, { project: pid, shoot: sh }); }
+    else if (a === 'shoot-budget') {
+      el.disabled = true;
+      api('obwShootsToBudget', [pid]).then(function (r) { DATA.projects = DATA.projects.map(function (p) { return p.id === pid ? Object.assign({}, p, r.project) : p; }); rerender(); say('Project budget now matches the shoots', true); }, function (e) { el.disabled = false; say(e.message); });
+    }
+  }, true);
+
   /* ---------- clicks (capture phase, so legacy handlers never see ours) ---------- */
   document.addEventListener('click', function (ev) {
     var t = ev.target; if (!t.closest) return;
     var menu = $('obx-menu');
     if (menu && !menu.hidden && !t.closest('.obx-addwrap')) menu.hidden = true;
+    if (t.closest('#obx-modal [data-act]')) closeM();   // e.g. "+ Add cost to this shoot" opens the original cost form
     var el = t.closest('[data-obx],[data-obxbill],[data-obxrev],[data-obxsplit],[data-obxover],[data-obxmsg],[data-obxfix],[data-obxdis]');
     if (!el) { if (menu && t.closest('#obx-menu [data-act]')) menu.hidden = true; return; }
     ev.stopPropagation(); ev.preventDefault();

@@ -17,6 +17,7 @@ Invoices, quotes, emailing, payments, the bank, vendors, crew and settings all r
 
 - **Entries**: lines from split bills and approved bills. Two columns are added on first use: `bill_id` (links the lines of one bill) and `allocation` (`overhead`).
 - **Approvals**: each document Claude reads waits here (`source` = `bill_upload`) until you approve or reject it.
+- **Shoots** (new tab): the shoots inside each project, each with its own date, fee, invoice and budget by cost type. Renaming a shoot also renames it on that project's cost lines.
 - **Inbox** (new tab): one row per check, with Claude's message and the list of issues.
 - **AIUsage**: every Claude call, with its cost. Calls are counted against `claude_monthly_budget_usd`.
 - **AuditLog**: every change, with old and new values.
