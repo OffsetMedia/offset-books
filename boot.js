@@ -157,5 +157,6 @@
   document.addEventListener('visibilitychange', checkVersion);
   if ('serviceWorker' in navigator) window.addEventListener('load', function () { navigator.serviceWorker.register('sw.js').catch(function () { /* fine without it */ }); });
   start();
-  if (window.google && google.accounts && google.accounts.id) window.OB_GSI_READY();
+  // Load Google sign-in from code (no inline onload handler, so the security policy can forbid inline scripts).
+  (function () { var g = document.createElement('script'); g.src = 'https://accounts.google.com/gsi/client'; g.async = true; g.onload = function () { window.OB_GSI_READY(); }; document.head.appendChild(g); })();
 })();

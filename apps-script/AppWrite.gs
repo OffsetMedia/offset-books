@@ -58,6 +58,7 @@ function obwHandle(e) {
   if (!body || !Object.prototype.hasOwnProperty.call(OBW_ACTIONS, body.fn)) return null;
   try {
     var user = obwAuth_(body.token);
+    obwRateLimit_(user, body.fn);
     var data = OBW_ACTIONS[body.fn](user, body.args || []);
     return obwOut_({ ok: true, data: data });
   } catch (err) {
@@ -94,6 +95,15 @@ function obwAuth_(token) {
   throw obwErr_('This account is not set up in Offset Books.', 'noaccess');
 }
 
+/** Caps calls per person per minute (stolen sign-in, a stuck loop). Claude-backed actions get a much lower cap. */
+function obwRateLimit_(user, fn) {
+  var cache = CacheService.getScriptCache(), minute = Math.floor(Date.now() / 60000);
+  var heavy = fn === 'obwUploadBill' || fn === 'obwRunAudit';
+  var key = 'obw_rl_' + (heavy ? 'ai_' : '') + user.email + '_' + minute, n = Number(cache.get(key) || 0) + 1;
+  cache.put(key, String(n), 120);
+  if (n > (heavy ? 12 : 150)) throw obwErr_(heavy ? 'Too many documents in one minute. Wait a moment and try again.' : 'Too many requests. Wait a minute and try again.', 'rate');
+}
+
 function obwRequireAdmin_(user) {
   if (user.role !== 'admin') throw obwErr_('Only the admin can make this change.', 'forbidden');
 }
@@ -125,6 +135,15 @@ function obwEnsureCols_(t, cols) {
   });
 }
 
+/**
+ * Text that starts with = + @ (or - followed by a non-number) would run as a spreadsheet formula when written,
+ * e.g. a supplier name planted in a bill. Store it as plain text instead by prefixing an apostrophe (Sheets hides it).
+ */
+function obwSafeText_(v) {
+  var s = v == null ? '' : String(v);
+  return /^[=+@\t\r]/.test(s) || /^-(?![\d.])/.test(s) ? "'" + s : s;
+}
+
 function obwClean_(field, v) {
   if (v == null) return '';
   if (OBW_NUMERIC[field]) {
@@ -133,7 +152,7 @@ function obwClean_(field, v) {
     if (!isFinite(n)) throw obwErr_('"' + field + '" must be a number.');
     return Math.round(n * 100) / 100;
   }
-  return String(v).trim();
+  return obwSafeText_(String(v).trim());
 }
 
 function obwRowArray_(t, obj) {
@@ -158,7 +177,7 @@ function obwNextId_(rows, prefix, width) {
 function obwAudit_(user, tab, record, field, oldV, newV, reason) {
   var sh = obwSs_().getSheetByName('AuditLog');
   if (!sh) return;
-  sh.appendRow([obwNow_(), user.email, tab, record, field, oldV == null ? '' : String(oldV), newV == null ? '' : String(newV), reason || '']);
+  sh.appendRow([obwNow_(), user.email, tab, record, field, obwSafeText_(oldV == null ? '' : String(oldV)), obwSafeText_(newV == null ? '' : String(newV)), obwSafeText_(reason || '')]);
 }
 
 function obwNow_() { return Utilities.formatDate(new Date(), 'Asia/Colombo', 'yyyy-MM-dd HH:mm'); }
@@ -551,6 +570,7 @@ function obwUploadBill_(user, args) {
   obwRequireAdmin_(user);
   var f = args[0] || {};
   if (!f.data) throw obwErr_('No file received.');
+  if (String(f.data).length > 27000000) throw obwErr_('That file is too big (over 20 MB). Upload a smaller PDF or photo.');
   var mime = String(f.mime || '');
   if (!/^application\/pdf$|^image\/(jpeg|png|webp|gif)$/.test(mime)) throw obwErr_('Upload a PDF or a photo (JPG or PNG).');
   var settings = obwSettings_();
@@ -585,9 +605,9 @@ function obwUploadBill_(user, args) {
   try {
     var t = obwTable_('Approvals');
     var id = obwNextId_(t.rows, 'AP', 4), first = (s.lines && s.lines[0]) || {};
-    var row = { id: id, bank_line: '', suggestion: JSON.stringify(s), status: 'pending', created_at: obwNow_(), source: 'bill_upload',
-      submitted_by: user.email, submitted_at: obwNow_(), kind: 'cost', date: s.date || '', amount: s.total || '', payee: s.payee || s.supplier || '',
-      description: (s.doc_number ? s.doc_number + ' ' : '') + (first.description || ''), project: first.project || '' };
+    var row = { id: id, bank_line: '', suggestion: obwSafeText_(JSON.stringify(s)), status: 'pending', created_at: obwNow_(), source: 'bill_upload',
+      submitted_by: user.email, submitted_at: obwNow_(), kind: 'cost', date: obwSafeText_(s.date || ''), amount: isFinite(Number(s.total)) ? Number(s.total) : '', payee: obwSafeText_(s.payee || s.supplier || ''),
+      description: obwSafeText_((s.doc_number ? s.doc_number + ' ' : '') + (first.description || '')), project: obwSafeText_(first.project || '') };
     t.sh.appendRow(obwRowArray_(t, row));
     row.suggestion = s;
     return row;
@@ -790,6 +810,18 @@ function obwAuditIssues_() {
   var last = /(\d+)$/.exec(String(st.last_invoice_number || ''));
   if (last && Number(last[1]) < maxInv) add('set-invno', 'high', 'Invoice numbering is behind', 'Settings says the last invoice was ' + st.last_invoice_number + ', but Invoices already has a higher number. The next invoice could reuse a number.', { type: 'settings' });
 
+  // 9b. bank details printed on invoices: alarm if they change (classic invoice-fraud trick)
+  try {
+    var bankNow = [st.bank_account_name, st.bank_account_number, st.bank_name, st.bank_branch, st.bank_details].map(function (x) { return String(x || '').trim(); }).join('|');
+    var props = PropertiesService.getScriptProperties(), bankWas = props.getProperty('OBW_BANK_FINGERPRINT');
+    if (!bankWas) props.setProperty('OBW_BANK_FINGERPRINT', bankNow);
+    else if (bankWas !== bankNow) {
+      var last4 = function (x) { var n = String(x).split('|')[1] || ''; return n ? '••••' + n.slice(-4) : '(blank)'; };
+      add('bank-changed-' + Utilities.base64EncodeWebSafe(Utilities.computeDigest(Utilities.DigestAlgorithm.SHA_256, bankNow)).slice(0, 12), 'high',
+        'The bank details on your invoices changed', 'Account was ' + last4(bankWas) + ', now ' + last4(bankNow) + ' (Settings tab). If you did not make this change, fix it before sending any invoice. Dismiss only if the change is yours.', { type: 'settings' });
+    }
+  } catch (x) { /* never block the check */ }
+
   // 10. unpaid costs older than 30 days
   E.forEach(function (e) { if (e.kind === 'cost' && e.paid_status === 'unpaid' && obwNum_(e.amount) > 0 && obwDays_(e.date, today) > 30) add('unpaid-' + e.id, 'low', 'Unpaid for ' + obwDays_(e.date, today) + ' days: ' + e.payee + ' LKR ' + money(obwNum_(e.amount)), (e.description || '') + '. Pay it, or mark it paid if it already went out.', { type: 'entry', id: e.id }); });
 
@@ -839,7 +871,7 @@ function obwRunAuditCore_(trigger) {
   var lock = obwLock_();
   try {
     var t = obwInboxTable_();
-    var msg = { id: obwNextId_(t.rows, 'M', 4), time: obwNow_(), kind: 'audit', title: title, body: body, issues: JSON.stringify(issues), status: 'unread', trigger: trigger || 'manual' };
+    var msg = { id: obwNextId_(t.rows, 'M', 4), time: obwNow_(), kind: 'audit', title: obwSafeText_(title), body: obwSafeText_(body), issues: obwSafeText_(JSON.stringify(issues)), status: 'unread', trigger: trigger || 'manual' };
     t.sh.appendRow(obwRowArray_(t, msg));
     msg.issues = issues;
     return msg;
@@ -881,6 +913,12 @@ function obwInboxAction_(user, args) {
   obwRequireAdmin_(user);
   var id = String(args[0] || ''), action = args[1], key = args[2];
   if (action === 'dismiss' && key) {
+    if (/^bank-changed-/.test(String(key))) {
+      var st = obwSettings_();
+      PropertiesService.getScriptProperties().setProperty('OBW_BANK_FINGERPRINT', [st.bank_account_name, st.bank_account_number, st.bank_name, st.bank_branch, st.bank_details].map(function (x) { return String(x || '').trim(); }).join('|'));
+      obwAudit_(user, 'Settings', 'bank details', 'confirmed', '', 'Bank detail change confirmed by admin', 'Inbox');
+      return { dismissed: key };
+    }
     var dis = obwDismissed_(); dis[key] = obwNow_();
     PropertiesService.getScriptProperties().setProperty('OBW_DISMISSED', JSON.stringify(dis));
     return { dismissed: key };
@@ -907,7 +945,7 @@ function obwShootTable_() {
 }
 function obwShootClean_(f, v) {
   if (OBW_SHOOT_NUM[f]) { if (v === '' || v == null) return ''; var n = Number(String(v).replace(/,/g, '')); if (!isFinite(n)) throw obwErr_(f + ' must be a number.'); return Math.round(n * 100) / 100; }
-  return v == null ? '' : String(v).trim();
+  return v == null ? '' : obwSafeText_(String(v).trim());
 }
 function obwShootKey_(name) { return String(name || '').trim().toLowerCase(); }
 
