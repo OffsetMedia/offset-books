@@ -223,7 +223,7 @@
     return '<div class="card' + (cls === 'profit' ? ' profit' : '') + '"><div class="label">' + esc(label) + '</div><div class="big' + (cls && cls !== 'profit' ? ' ' + cls : '') + '">' + value + '</div>' + (note ? '<div class="note">' + note + '</div>' : '') + '</div>';
   }
   function statusBadge(s) {
-    var cls = (s === 'Delivered' || s === 'Closed') ? 'good' : (s === 'Cancelled' ? 'late' : '');
+    var cls = (s === 'Delivered' || s === 'Closed' || s === 'paid' || s === 'approved' || s === 'invoiced') ? 'good' : (s === 'Cancelled' || s === 'declined' ? 'late' : (s === 'draft' ? 'muted' : (s === 'part paid' ? 'warn' : '')));
     return '<span class="pillbadge ' + cls + '">' + esc(s || '') + '</span>';
   }
   function editBanner() {
@@ -252,7 +252,9 @@
     h += '<h1 class="page-title">Dashboard</h1><p class="sub">Financial year from ' + esc(monLabel(c.months[0])) + '. Accrual basis, LKR.</p>';
     h += editBanner();
     var na = canEdit() ? toAssign().length : 0;
-    if (na) h += '<button class="banner warnb" data-go="assign" type="button"><b>' + na + ' supplier cost' + (na === 1 ? '' : 's') + '</b> need a project. Tap to assign or split them.</button>';
+    if (na) h += '<button class="banner warnb" data-go="review" type="button"><b>' + na + ' supplier cost' + (na === 1 ? '' : 's') + '</b> need a project. Tap to assign or split them.</button>';
+    var nr = canEdit() ? reviews().length : 0;
+    if (nr) h += '<button class="banner warnb" data-go="review" type="button"><b>' + nr + ' bill' + (nr === 1 ? '' : 's') + '</b> read by Claude ' + (nr === 1 ? 'is' : 'are') + ' waiting for your approval.</button>';
     h += '<div class="grid kpis">';
     h += kpi('Profit', lkr(c.profit), 'Income less costs, director loans excluded', 'profit');
     h += kpi('Income', lkr(c.income), 'Production ' + lkr(c.prod.income) + (c.ai.income ? ' · AI data ' + lkr(c.ai.income) : ''));
@@ -338,7 +340,7 @@
     var h = '<button class="pill ghost" data-go="projects" type="button">&larr; All projects</button>';
     h += '<div class="titlerow" style="margin-top:14px"><div><h1 class="page-title">' + esc(p.name) + '</h1>';
     h += '<p class="sub">' + esc(p.client) + ' · ' + statusBadge(p.status) + (p.start ? ' · ' + esc(p.start) + (p.end ? ' to ' + esc(p.end) : '') : '') + (p.property ? ' · ' + esc(p.property) : '') + '</p></div>';
-    if (edit) h += '<button class="pill ghost" data-act="edit-project" type="button">Edit project and budget</button>';
+    if (edit) h += '<div class="btns"><button class="pill ghost" data-act="new-invoice" type="button">New invoice</button><button class="pill ghost" data-act="new-quote" type="button">New quote</button><button class="pill ghost" data-act="edit-project" type="button">Edit project and budget</button></div>';
     h += '</div>';
     h += editBanner();
 
@@ -369,11 +371,9 @@
     h += '<div class="card tablewrap" style="margin-top:14px"><div class="cardhead"><h3>Income</h3>' + (edit ? '<button class="pill ghost small" data-act="add-income" type="button">Add income</button>' : '') + '</div>' +
       entryRows(income, { empty: 'No income recorded against this project.' }) + '</div>';
 
-    h += '<div class="card tablewrap" style="margin-top:14px"><h3>Invoices</h3>' + (invs.length ?
-      '<table><thead><tr><th>Number</th><th>Date</th><th>Due</th><th>Status</th><th class="num">Total</th><th class="num">Paid</th></tr></thead><tbody>' +
-      invs.map(function (i) {
-        return '<tr><td>' + (i.pdf_url ? '<a href="' + esc(i.pdf_url) + '" target="_blank" rel="noopener">' + esc(i.number) + '</a>' : esc(i.number)) + '</td><td>' + esc(i.date) + '</td><td>' + esc(i.due) + '</td><td>' + statusBadge(i.status) + '</td><td class="num">' + money0(i.total) + '</td><td class="num">' + money0(num(i.paid_amount) + num(i.advance_applied)) + '</td></tr>';
-      }).join('') + '</tbody></table>' : '<div class="empty">No invoices for this project.</div>') + '</div>';
+    h += '<div class="card tablewrap" style="margin-top:14px"><h3>Invoices</h3>' + docTable(invs, 'invoice') + '</div>';
+    var pq = quotesAll().filter(function (q) { return String(q.project) === String(p.id); });
+    if (pq.length) h += '<div class="card tablewrap" style="margin-top:14px"><h3>Quotes</h3>' + docTable(pq, 'quote') + '</div>';
 
     if (p.notes) h += '<div class="card" style="margin-top:14px"><h3>Notes</h3><p class="muted" style="white-space:pre-wrap">' + esc(p.notes) + '</p></div>';
     return h;
@@ -413,25 +413,363 @@
     }).join('');
   }
 
-  /* ---------- to assign ---------- */
-  function viewAssign() {
-    var list = toAssign();
-    var h = '<div class="titlerow"><div><h1 class="page-title">To assign</h1><p class="sub">Supplier costs (rentals, crew, studios) with no project yet. Assign each one to a project, split it across several, or mark it as overhead.</p></div>' +
-      (canEdit() ? '<button class="pill" data-act="add-bill" type="button">Add split bill</button>' : '') + '</div>';
+  /* ---------- review (bills to read + costs to assign) ---------- */
+  function viewReview() {
+    var list = toAssign(), rq = reviews(), edit = canEdit();
+    var h = '<div class="titlerow"><div><h1 class="page-title">Review</h1><p class="sub">Upload supplier bills and Claude reads them and suggests which project each line belongs to. Nothing goes into the books until you approve it.</p></div></div>';
     h += editBanner();
-    if (!list.length) return h + '<div class="card empty">Nothing waiting. New rental and crew payments without a project will show up here.</div>';
-    h += '<div class="grid">' + list.map(function (e) {
-      return '<div class="card assign"><div><div class="label">' + esc(e.date) + ' · ' + esc(e.cost_type) + '</div><div class="big small-big">' + lkr(e.amount) + '</div>' +
+    if (edit) {
+      var busy = uploading.total > 0;
+      h += '<label class="dropzone' + (busy ? ' busy' : '') + '" id="dropzone"><input type="file" id="bill-files" accept="application/pdf,image/*" multiple hidden>' +
+        '<span class="dz-title">' + (busy ? 'Reading ' + Math.min(uploading.done + 1, uploading.total) + ' of ' + uploading.total + '…' : 'Upload bills') + '</span>' +
+        '<span class="muted small">' + (busy ? 'Claude is reading each document. You can keep using the app.' : 'PDFs or photos. Drop them here or tap to choose. Several at once is fine.') + '</span>' +
+        (busy ? '<span class="bar" style="width:100%"><i style="width:' + Math.round(uploading.done / uploading.total * 100) + '%"></i></span>' : '') + '</label>';
+    }
+    h += '<div class="card" style="margin-top:14px"><div class="cardhead"><h3>Bills waiting for you</h3>' + (edit && rq.length ? '<button class="pill small" data-act="start-review" type="button">Review one by one</button>' : '') + '</div>';
+    if (!rq.length) h += '<div class="empty">No bills waiting. Upload some above.</div>';
+    else h += '<ul class="list">' + rq.map(function (r, i) {
+      var s = r.suggestion || {};
+      return '<li class="clickrow" data-review="' + i + '" tabindex="0"><span><b>' + esc(s.payee || s.supplier || 'Unknown supplier') + '</b> · ' + esc(s.doc_number || 'no invoice no.') +
+        '<br><span class="muted small">' + esc(s.date || '') + ' · ' + (s.lines || []).length + ' line' + ((s.lines || []).length === 1 ? '' : 's') + ' · Claude ' + esc(s.confidence || 'unsure') + '</span></span><span>' + lkr(s.total) + '</span></li>';
+    }).join('') + '</ul>';
+    h += '</div>';
+
+    h += '<div class="card" style="margin-top:14px"><div class="cardhead"><h3>Costs with no project</h3>' + (edit ? '<button class="pill ghost small" data-act="add-bill" type="button">Add split bill</button>' : '') + '</div>' +
+      '<p class="muted small" style="margin-top:0">Rental, crew and studio payments that came in without a project.</p>';
+    if (!list.length) h += '<div class="empty">Nothing waiting.</div>';
+    else h += '<div class="grid">' + list.map(function (e) {
+      return '<div class="assign"><div><div class="label">' + esc(e.date) + ' · ' + esc(e.cost_type) + '</div><div class="big small-big">' + lkr(e.amount) + '</div>' +
         '<div><b>' + esc(e.payee) + '</b> · ' + esc(e.description) + (e.doc_number ? ' · ' + esc(e.doc_number) : '') + '</div>' + (e.notes ? '<div class="note">' + esc(e.notes) + '</div>' : '') + '</div>' +
-        (canEdit() ? '<div class="btns"><button class="pill small" data-split="' + esc(e.id) + '" type="button">Assign or split</button><button class="pill ghost small" data-overhead="' + esc(e.id) + '" type="button">It\'s overhead</button></div>' : '') + '</div>';
+        (edit ? '<div class="btns"><button class="pill small" data-split="' + esc(e.id) + '" type="button">Assign or split</button><button class="pill ghost small" data-overhead="' + esc(e.id) + '" type="button">It\'s overhead</button></div>' : '') + '</div>';
     }).join('') + '</div>';
+    return h + '</div>';
+  }
+
+  /* ---------- clients ---------- */
+  function clientRowsAll() { return state.data.clients || (state.meta && state.meta.clientRows) || []; }
+  function clientNames() {
+    var rows = clientRowsAll();
+    return uniq(rows.map(function (c) { return c.name; }).concat((state.data.projects || []).map(function (p) { return p.client; })).concat((state.data.invoices || []).map(function (i) { return i.client; })));
+  }
+  function clientRow(name) { return clientRowsAll().filter(function (c) { return c.name === name; })[0] || { name: name }; }
+  function quotesAll() { return state.data.quotes || (state.meta && state.meta.quotes) || []; }
+  function clientStats(name) {
+    var projects = (state.data.projects || []).filter(function (p) { return p.client === name; }), pids = projects.map(function (p) { return String(p.id); });
+    var invoices = (state.data.invoices || []).filter(function (i) { return i.client === name; });
+    var quotes = quotesAll().filter(function (q) { return q.client === name; });
+    var income = (state.data.entries || []).filter(function (e) { return e.kind === 'income' && (e.payee === name || (pids.indexOf(String(e.project)) !== -1 && blank(e.payee))); });
+    var billed = 0, paid = 0, owed = 0, earned = 0;
+    invoices.forEach(function (i) { if (i.status === 'draft' || i.status === 'void' || i.status === 'cancelled') return; billed += num(i.total); var p = num(i.paid_amount) + num(i.advance_applied); paid += p; if (i.status === 'sent' || i.status === 'part paid') owed += Math.max(0, num(i.total) - p); });
+    income.forEach(function (e) { earned += num(e.amount); });
+    return { projects: projects, invoices: invoices, quotes: quotes, income: income, billed: billed, paid: paid, owed: owed, earned: earned };
+  }
+
+  function viewClients() {
+    var names = clientNames();
+    var h = '<div class="titlerow"><div><h1 class="page-title">Clients</h1><p class="sub">Tap a client for their projects, quotes, invoices and payments.</p></div>' +
+      (canEdit() ? '<button class="pill" data-act="new-client" type="button">New client</button>' : '') + '</div>';
+    h += editBanner();
+    if (!names.length) return h + '<div class="card empty">No clients yet.</div>';
+    var rows = names.map(function (n) { return { n: n, c: clientRow(n), s: clientStats(n) }; }).sort(function (a, b) { return b.s.earned - a.s.earned || a.n.localeCompare(b.n); });
+    h += '<div class="card tablewrap"><table><thead><tr><th>Client</th><th>Type</th><th class="num">Projects</th><th class="num">Income</th><th class="num">Owed</th></tr></thead><tbody>' +
+      rows.map(function (r) {
+        return '<tr class="clickrow" data-client="' + esc(r.n) + '" tabindex="0"><td><b>' + esc(r.n) + '</b></td><td class="muted">' + esc(r.c.type || '') + '</td><td class="num">' + r.s.projects.length + '</td><td class="num">' + money0(r.s.earned) + '</td><td class="num' + (r.s.owed ? ' warn' : '') + '">' + (r.s.owed ? money0(r.s.owed) : '<span class="muted">-</span>') + '</td></tr>';
+      }).join('') + '</tbody></table></div>';
     return h;
+  }
+
+  function docTable(list, kind, showClient) {
+    if (!list.length) return '<div class="empty">No ' + kind + 's yet.</div>';
+    return '<table><thead><tr><th>Number</th><th>Date</th>' + (kind === 'invoice' ? '<th>Due</th>' : '<th>Valid until</th>') + '<th>Project</th><th>Status</th><th class="num">Total</th>' + (kind === 'invoice' ? '<th class="num">Paid</th>' : '') + '</tr></thead><tbody>' +
+      list.slice().sort(function (a, b) { return String(b.date).localeCompare(String(a.date)); }).map(function (i) {
+        return '<tr class="clickrow" data-doc="' + kind + ':' + esc(i.number) + '" tabindex="0"><td class="nowrap"><b>' + esc(i.number) + '</b>' + (showClient ? '<br><span class="muted small">' + esc(i.client) + '</span>' : '') + '</td><td class="nowrap">' + esc(i.date) + '</td><td class="nowrap">' + esc(kind === 'invoice' ? i.due : i.valid_until) + '</td>' +
+          '<td>' + esc(projectName(i.project)) + '</td><td>' + statusBadge(i.status) + '</td><td class="num">' + money0(i.total) + '</td>' + (kind === 'invoice' ? '<td class="num">' + money0(num(i.paid_amount) + num(i.advance_applied)) + '</td>' : '') + '</tr>';
+      }).join('') + '</tbody></table>';
+  }
+
+  function viewClient() {
+    var name = state.clientName, c = clientRow(name), s = clientStats(name), edit = canEdit();
+    var h = '<button class="pill ghost" data-go="clients" type="button">&larr; All clients</button>';
+    h += '<div class="titlerow" style="margin-top:14px"><div><h1 class="page-title">' + esc(name) + '</h1><p class="sub">' + [c.type, c.contact, c.phone, c.email].filter(Boolean).map(esc).join(' · ') + '</p></div>' +
+      (edit ? '<div class="btns"><button class="pill" data-act="new-invoice" type="button">New invoice</button><button class="pill ghost" data-act="new-quote" type="button">New quote</button><button class="pill ghost" data-act="edit-client" type="button">Edit details</button></div>' : '') + '</div>';
+    h += '<div class="grid kpis">' + kpi('Income recorded', lkr(s.earned), s.income.length + ' payment line' + (s.income.length === 1 ? '' : 's'), 'profit') +
+      kpi('Invoiced', lkr(s.billed), s.invoices.length + ' invoice' + (s.invoices.length === 1 ? '' : 's')) +
+      kpi('Owed', lkr(s.owed), s.owed ? 'On sent invoices' : 'Nothing outstanding', s.owed ? 'warn' : 'good') +
+      kpi('Projects', String(s.projects.length), s.quotes.length + ' quote' + (s.quotes.length === 1 ? '' : 's')) + '</div>';
+    if (c.notes) h += '<div class="card"><h3>Notes</h3><p class="muted" style="white-space:pre-wrap;margin:0">' + esc(c.notes) + '</p></div>';
+    h += '<div class="card" style="margin-top:14px"><h3>Projects</h3>' + (s.projects.length ? '<ul class="list">' + s.projects.map(function (p) {
+      return '<li class="clickrow" data-project="' + esc(p.id) + '" tabindex="0"><span>' + esc(p.name) + '<br><span class="muted small">' + esc(p.start || '') + '</span></span><span>' + statusBadge(p.status) + '</span></li>'; }).join('') + '</ul>' : '<div class="empty">No projects.</div>') + '</div>';
+    h += '<div class="card tablewrap" style="margin-top:14px"><h3>Invoices</h3>' + docTable(s.invoices, 'invoice') + '</div>';
+    h += '<div class="card tablewrap" style="margin-top:14px"><h3>Quotes</h3>' + docTable(s.quotes, 'quote') + '</div>';
+    h += '<div class="card tablewrap" style="margin-top:14px"><h3>Payments and income</h3>' + entryRows(s.income.slice().sort(function (a, b) { return String(b.date).localeCompare(String(a.date)); }), { showProject: true, empty: 'No income recorded.' }) + '</div>';
+    return h;
+  }
+
+  function openClientForm(c) {
+    var isNew = !c, x = c || { type: 'One-off' };
+    var body = '<form class="form" novalidate>' + field('Client name', input('name', x.name, isNew ? 'required' : 'readonly')) +
+      '<div class="row2">' + field('Type', select('type', pairs(['Recurring', 'One-off', 'One-off (large)']), x.type)) + field('Contact person', input('contact', x.contact)) + '</div>' +
+      '<div class="row2">' + field('Phone', input('phone', x.phone, 'type="tel"')) + field('Email', input('email', x.email, 'type="email"')) + '</div>' +
+      field('Notes', '<textarea name="notes" rows="3">' + esc(x.notes) + '</textarea>') +
+      (isNew ? '' : '<p class="note">The name can\'t be changed here yet, because projects and invoices refer to it.</p>') +
+      '<p class="form-err" id="form-err" role="alert"></p><div class="modal-actions"><span class="spacer"></span><button class="pill ghost" type="button" data-close>Cancel</button><button class="pill" type="submit">' + (isNew ? 'Add client' : 'Save') + '</button></div></form>';
+    openModal(isNew ? 'New client' : 'Edit ' + x.name, body, function (m) {
+      var form = m.querySelector('form');
+      form.addEventListener('submit', function (ev) {
+        ev.preventDefault();
+        var d = formData(form);
+        if (!d.name) { $('form-err').textContent = 'Enter the client name.'; return; }
+        if (d.email && !/^[^@\s]+@[^@\s]+\.[^@\s]+$/.test(d.email)) { $('form-err').textContent = 'That email address doesn\'t look right.'; return; }
+        if (!isNew) d.original_name = x.name;
+        closeModal();
+        var before = clientRowsAll().slice();
+        function setRows(rows) { state.data.clients = rows; if (state.meta) state.meta.clientRows = rows; }
+        var ok = false;
+        commit(function () { setRows(before.filter(function (r) { return r.name !== d.name; }).concat([Object.assign({}, x, d)])); if (isNew) { state.clientName = d.name; state.view = 'client'; } },
+          function () { return api('obwSaveClient', [d]); }, function () { ok = true; }, isNew ? 'Client added' : 'Client saved').then(function () {
+          if (!ok) { setRows(before); if (isNew) state.view = 'clients'; render(true); }
+        });
+      });
+    });
+  }
+
+  /* ---------- sales (invoices and quotes, using the existing generator in Code.gs) ---------- */
+  var docFilter = { status: '', q: '' };
+  function viewSales() {
+    var inv = state.data.invoices || [], q = quotesAll(), c = compute(state.data), edit = state.data.user.role === 'admin';
+    var f = docFilter, qq = f.q.toLowerCase();
+    function match(d) { return (!f.status || d.status === f.status) && (!qq || [d.number, d.client, d.subject, projectName(d.project)].join(' ').toLowerCase().indexOf(qq) !== -1); }
+    var h = '<div class="titlerow"><div><h1 class="page-title">Invoices and quotes</h1><p class="sub">Create, preview, email and record payments. PDFs are filed in Drive automatically.</p></div>' +
+      (edit ? '<div class="btns"><button class="pill" data-act="new-invoice" type="button">New invoice</button><button class="pill ghost" data-act="new-quote" type="button">New quote</button></div>' : '') + '</div>';
+    h += '<div class="grid kpis">' + kpi('Owed to you', lkr(c.owed), c.openCount + ' open invoice' + (c.openCount === 1 ? '' : 's') + (c.overdue ? ' · <span class="over">' + lkr(c.overdue) + ' overdue</span>' : '')) +
+      kpi('Drafts', String(inv.filter(function (x) { return x.status === 'draft'; }).length + q.filter(function (x) { return x.status === 'draft'; }).length), 'Not sent yet') +
+      kpi('Quotes out', String(q.filter(function (x) { return x.status === 'sent'; }).length), 'Waiting for an answer') + '</div>';
+    h += '<div class="filters card two"><input id="d-q" type="search" placeholder="Search number, client, subject" value="' + esc(f.q) + '"><select id="d-status"><option value="">Any status</option>' +
+      ['draft', 'sent', 'part paid', 'paid', 'approved', 'declined', 'invoiced'].map(function (x) { return '<option' + (f.status === x ? ' selected' : '') + '>' + x + '</option>'; }).join('') + '</select></div>';
+    h += '<div class="card tablewrap"><h3>Invoices</h3>' + docTable(inv.filter(match), 'invoice', true) + '</div>';
+    h += '<div class="card tablewrap" style="margin-top:14px"><h3>Quotes</h3>' + docTable(q.filter(match), 'quote', true) + '</div>';
+    return h;
+  }
+
+  function findDoc(kind, number) { return (kind === 'quote' ? quotesAll() : (state.data.invoices || [])).filter(function (d) { return String(d.number) === String(number); })[0]; }
+  function putDoc(kind, d) {
+    if (!d || !d.number) return;
+    var key = kind === 'quote' ? 'quotes' : 'invoices', list = state.data[key] = (state.data[key] || (kind === 'quote' && state.meta ? state.meta.quotes : []) || []).slice();
+    var i = list.findIndex(function (x) { return String(x.number) === String(d.number); });
+    if (i === -1) list.push(d); else list[i] = d;
+  }
+  function putEntries(list) { (list || []).forEach(function (e) { if (e && e.id) replaceEntry(e.id, e); }); }
+  /** Applies whatever a Code.gs action returned (invoice, quote, entries, client) to the screen. */
+  function applyDocResult(r) {
+    if (!r) return;
+    if (r.invoice) putDoc('invoice', r.invoice);
+    if (r.quote) putDoc('quote', r.quote);
+    if (r.entries) putEntries(r.entries);
+    if (r.client) { var rows = clientRowsAll().filter(function (c) { return c.name !== r.client.name; }); rows.push(r.client); state.data.clients = rows; }
+    if (r.deleted) { state.data.invoices = (state.data.invoices || []).filter(function (x) { return x.number !== r.deleted; }); state.data.quotes = quotesAll().filter(function (x) { return x.number !== r.deleted; }); }
+  }
+  /** Server-confirmed action (numbers, PDFs and emails come from the server, so these wait for it). */
+  function docCall(btn, fn, args, okMsg, then) {
+    if (btn) { btn.disabled = true; btn.setAttribute('data-label', btn.textContent); btn.textContent = 'Working…'; }
+    setSaving(1);
+    return api(fn, args).then(function (r) { applyDocResult(r); render(true); toast(okMsg); then && then(r); },
+      function (e) { toast(e.message || 'Something went wrong', true); if (btn && document.body.contains(btn)) { btn.disabled = false; btn.textContent = btn.getAttribute('data-label'); } })
+      .then(function () { setSaving(-1); });
+  }
+  function parseLines(s) { try { var v = typeof s === 'string' ? JSON.parse(s || '[]') : s; return Array.isArray(v) ? v : []; } catch (e) { return []; } }
+  function addDaysIso(ymd, n) { var d = new Date(ymd + 'T00:00:00'); d.setDate(d.getDate() + n); return d.getFullYear() + '-' + ('0' + (d.getMonth() + 1)).slice(-2) + '-' + ('0' + d.getDate()).slice(-2); }
+
+  /* ----- document view: preview + actions ----- */
+  function openDoc(kind, number) {
+    var d = findDoc(kind, number); if (!d) return;
+    var isInv = kind === 'invoice', st = d.status, edit = state.data.user.role === 'admin';
+    var bal = isInv ? num(d.total) - num(d.advance_applied) - num(d.paid_amount) : 0;
+    var acts = [];
+    if (edit) {
+      if (st === 'draft') { acts.push('<button class="pill" type="button" data-a="email">Email to client</button>', '<button class="pill ghost" type="button" data-a="edit">Edit</button>', '<button class="pill ghost" type="button" data-a="marksent">Mark as sent (no email)</button>', '<button class="pill danger" type="button" data-a="delete">Delete draft</button>'); }
+      if (isInv && (st === 'sent' || st === 'part paid')) acts.push('<button class="pill" type="button" data-a="pay">Record payment</button>', '<button class="pill ghost" type="button" data-a="email">Email again</button>');
+      if (isInv && (st === 'part paid' || st === 'paid')) acts.push('<button class="pill ghost" type="button" data-a="undopay">Undo last payment</button>');
+      if (isInv && st !== 'draft') acts.push('<button class="pill ghost" type="button" data-a="edit">Change due date or notes</button>');
+      if (!isInv && st === 'sent') acts.push('<button class="pill" type="button" data-a="approve">Client approved</button>', '<button class="pill ghost" type="button" data-a="email">Email again</button>', '<button class="pill danger" type="button" data-a="decline">Declined</button>');
+      if (!isInv && st === 'approved') acts.push('<button class="pill" type="button" data-a="convert">Turn into invoice</button>', '<button class="pill danger" type="button" data-a="decline">Declined</button>');
+      if (!isInv && st === 'declined') acts.push('<button class="pill ghost" type="button" data-a="reopen">Reopen as draft</button>');
+      if (!isInv && st === 'draft') acts.push('<button class="pill ghost" type="button" data-a="approve">Client approved</button>');
+      acts.push('<button class="pill ghost" type="button" data-a="pdf">' + (d.pdf_url ? 'Refresh PDF' : 'Make PDF') + '</button>');
+    }
+    var body = '<div class="doc-head"><div>' + statusBadge(st) + ' <span class="muted">' + esc(d.client) + (d.project ? ' · ' + esc(projectName(d.project)) : '') + '</span></div>' +
+      '<div class="big small-big">' + lkr(isInv ? num(d.total) - num(d.advance_applied) : d.total) + '</div>' +
+      (isInv && st !== 'draft' ? '<div class="muted small">Paid ' + money0(num(d.paid_amount)) + ' · Balance ' + money0(Math.max(0, bal)) + (d.due ? ' · Due ' + esc(d.due) : '') + '</div>' : '') +
+      (d.sent_at ? '<div class="muted small">Sent ' + esc(d.sent_at) + (d.to_email ? ' to ' + esc(d.to_email) : '') + '</div>' : '') +
+      (d.pdf_url ? '<a class="note" href="' + esc(d.pdf_url) + '" target="_blank" rel="noopener">Open PDF in Drive</a>' : '') + '</div>' +
+      '<div class="doc-frame paper" id="doc-frame"><div class="spinner"></div></div>' +
+      '<div class="modal-actions doc-actions">' + acts.join('') + '</div>';
+    openModal((isInv ? 'Invoice ' : 'Quote ') + d.number, body, function (m) {
+      m.querySelector('.modal').classList.add('wide');
+      api('renderDoc', [kind, d.number]).then(function (r) { var f = $('doc-frame'); if (f) f.innerHTML = '<iframe title="Document preview" sandbox="" srcdoc="' + esc(r.html) + '"></iframe>'; },
+        function (e) { var f = $('doc-frame'); if (f) f.innerHTML = '<p class="muted">Preview unavailable: ' + esc(e.message) + '</p>'; });
+      m.querySelector('.doc-actions').addEventListener('click', function (ev) {
+        var btn = ev.target.closest('[data-a]'); if (!btn) return;
+        var a = btn.getAttribute('data-a'), reopen = function () { closeModal(); openDoc(kind, d.number); };
+        if (a === 'edit') { closeModal(); openDocForm(kind, d); }
+        else if (a === 'email') { closeModal(); openEmailForm(kind, d); }
+        else if (a === 'pay') { closeModal(); openPaymentForm(d); }
+        else if (a === 'pdf') docCall(btn, 'previewPdf', [kind, d.number], 'PDF saved to Drive', reopen);
+        else if (a === 'marksent') docCall(btn, 'sendDoc', [kind, d.number, {}], 'Marked as sent' + (isInv ? '; income line added' : ''), reopen);
+        else if (a === 'undopay') { if (armed(btn, 'Tap again to undo')) docCall(btn, 'undoLastPayment', [d.number], 'Last payment undone', reopen); }
+        else if (a === 'delete') { if (armed(btn, 'Tap again to delete')) docCall(btn, 'deleteDoc', [kind, d.number], 'Draft deleted', closeModal); }
+        else if (a === 'approve') docCall(btn, 'quoteAction', [d.number, 'approve'], 'Quote approved', reopen);
+        else if (a === 'decline') { if (armed(btn, 'Tap again to mark declined')) docCall(btn, 'quoteAction', [d.number, 'decline'], 'Quote declined', reopen); }
+        else if (a === 'reopen') docCall(btn, 'quoteAction', [d.number, 'reopen'], 'Quote reopened', reopen);
+        else if (a === 'convert') docCall(btn, 'convertQuote', [d.number], 'Invoice created', function (r) { closeModal(); if (r && r.invoice) openDoc('invoice', r.invoice.number); });
+      });
+    });
+  }
+  function armed(btn, label) {
+    if (btn.getAttribute('data-armed') === '1') return true;
+    btn.setAttribute('data-armed', '1'); btn.textContent = label; return false;
+  }
+
+  /* ----- create / edit invoice or quote ----- */
+  function openDocForm(kind, d, defaults) {
+    var isInv = kind === 'invoice', isNew = !d, sent = d && d.status !== 'draft';
+    var st = state.data.settings || {}, x = d ? Object.assign({}, d) : Object.assign({ date: todayIso(), label: 'Full payment' }, defaults || {});
+    if (isNew) { if (isInv) x.due = addDaysIso(x.date, num(st.payment_terms_days) || 14); else x.valid_until = addDaysIso(x.date, num(st.quote_valid_days) || 14); }
+    var lines = parseLines(x.lines); if (!lines.length) lines = [{ desc: '', detail: '', qty: 1, rate: '', amount: '' }];
+    var clients = clientNames();
+    var body;
+    if (sent) {
+      body = '<form class="form" novalidate><p class="note">This invoice has been sent, so only the due date, notes and email details can change. Lines and amounts are locked.</p>' +
+        '<div class="row2">' + field('Due date', input('due', x.due, 'type="date"')) + field('Send to (email)', input('to_email', x.to_email, 'type="email"')) + '</div>' +
+        field('Email subject', input('subject', x.subject)) + field('Notes on the invoice', '<textarea name="notes" rows="2">' + esc(x.notes) + '</textarea>') +
+        '<p class="form-err" id="form-err" role="alert"></p><div class="modal-actions"><span class="spacer"></span><button class="pill ghost" type="button" data-close>Cancel</button><button class="pill" type="submit">Save</button></div></form>';
+    } else {
+      body = '<div class="review-grid doc-edit"><div><form class="form" novalidate>' +
+        '<div class="row2">' + field('Client', input('client', x.client, 'list="dl-clients" autocomplete="off" required')) + field('Project', '<select name="project">' + projectOptions(x.project, true).replace('No project (company overhead)', 'No project') + '</select>') + '</div>' +
+        '<div class="row2">' + field('Date', input('date', x.date, 'type="date"')) + (isInv ? field('Due', input('due', x.due, 'type="date"')) : field('Valid until', input('valid_until', x.valid_until, 'type="date"'))) + '</div>' +
+        field('Subject (shown on the document)', input('subject', x.subject, 'placeholder="e.g. CPL 2026 match days"')) +
+        '<div class="label" style="margin-top:6px">Lines</div><div id="doc-lines"></div><div class="btns"><button class="pill ghost small" type="button" data-addline>Add line</button></div>' +
+        (isInv ? '<div class="row2">' + field('Invoice type', select('label', pairs(['Full payment', 'Advance', 'Balance']), x.label)) + field('Advance already paid (deducted)', input('advance_applied', x.advance_applied || '', 'inputmode="decimal" placeholder="0"')) + '</div>' : '') +
+        '<div class="bill-sum" id="doc-sum"></div>' +
+        field('Notes on the document', '<textarea name="notes" rows="2" placeholder="' + esc(isInv ? (st.invoice_notes || '') : (st.quote_notes || '')) + '">' + esc(x.notes) + '</textarea>') +
+        field('Client email (for sending)', input('to_email', x.to_email || clientRow(x.client).email || '', 'type="email"')) +
+        '<p class="form-err" id="form-err" role="alert"></p>' +
+        '<div class="modal-actions"><span class="spacer"></span><button class="pill ghost" type="button" data-close>Cancel</button><button class="pill" type="submit">' + (isNew ? 'Save draft' : 'Save changes') + '</button></div>' +
+        datalist('dl-clients', clients) + '</form></div><div class="doc-side"><div class="label">Live preview</div><div class="doc-frame paper" id="doc-frame"><p class="muted">Add a line to see the preview.</p></div></div></div>';
+    }
+    openModal(isNew ? (isInv ? 'New invoice' : 'New quote') : 'Edit ' + d.number, body, function (m) {
+      if (!sent) m.querySelector('.modal').classList.add('wide');
+      var form = m.querySelector('form'), box = $('doc-lines'), timer;
+      function readLines() {
+        return Array.prototype.map.call(box.querySelectorAll('.doc-line'), function (r) {
+          var q = r.querySelector('[name=d_qty]').value.trim(), rt = r.querySelector('[name=d_rate]').value.trim();
+          return { desc: r.querySelector('[name=d_desc]').value.trim(), detail: r.querySelector('[name=d_detail]').value.trim(), qty: q === '' ? '' : num(q), rate: rt === '' ? '' : num(rt) };
+        });
+      }
+      function draw() {
+        box.innerHTML = lines.map(function (l, i) {
+          return '<div class="bill-line doc-line">' + field('Item', input('d_desc', l.desc, 'placeholder="e.g. Photography, match day"')) +
+            field('Detail (optional)', input('d_detail', l.detail)) +
+            '<div class="row3">' + field('Qty', input('d_qty', l.qty == null ? '' : l.qty, 'inputmode="decimal"')) + field('Rate', input('d_rate', l.rate == null || l.rate === '' ? (l.amount || '') : l.rate, 'inputmode="decimal"')) +
+            '<div class="field"><span>Amount</span><div class="amt" data-amt="' + i + '"></div></div></div>' +
+            (lines.length > 1 ? '<button class="linkbtn" type="button" data-rm="' + i + '">Remove line</button>' : '') + '</div>';
+        }).join('');
+        sum();
+      }
+      function sum() {
+        var ls = readLines(), t = 0;
+        ls.forEach(function (l, i) { var a = (l.qty === '' ? 1 : l.qty) * (l.rate === '' ? 0 : l.rate); t += a; var el = box.querySelector('[data-amt="' + i + '"]'); if (el) el.textContent = money(a); });
+        var adv = form.elements.advance_applied ? num(form.elements.advance_applied.value) : 0;
+        $('doc-sum').innerHTML = 'Total <b>' + money(t) + '</b>' + (adv ? ' · less advance ' + money(adv) + ' · <b>due ' + money(t - adv) + '</b>' : '');
+        clearTimeout(timer); timer = setTimeout(preview, 600);
+      }
+      function payload() {
+        var f = formData(form), o = { number: d ? d.number : '', client: f.client, project: f.project, date: f.date, subject: f.subject, notes: f.notes, to_email: f.to_email,
+          lines: readLines().map(function (l) { return { desc: l.desc, detail: l.detail, qty: l.qty === '' ? 1 : l.qty, rate: l.rate === '' ? 0 : l.rate }; }).filter(function (l) { return l.desc || l.rate; }) };
+        if (isInv) { o.due = f.due; o.label = f.label; o.advance_applied = num(f.advance_applied); } else o.valid_until = f.valid_until;
+        if (x.quote_no) o.quote_no = x.quote_no;
+        return o;
+      }
+      var seq = 0;
+      function preview() {
+        var p = payload(), me = ++seq, fr = $('doc-frame'); if (!fr || !p.lines.length) return;
+        api('renderDoc', [kind, p]).then(function (r) { if (me === seq && $('doc-frame')) $('doc-frame').innerHTML = '<iframe title="Document preview" sandbox="" srcdoc="' + esc(r.html) + '"></iframe>'; }, function () { /* preview is optional */ });
+      }
+      if (!sent) {
+        draw();
+        box.addEventListener('input', sum);
+        form.addEventListener('input', function (e) { if (!box.contains(e.target)) sum(); });
+        form.elements.client.addEventListener('change', function () { var em = clientRow(form.elements.client.value).email; if (em && !form.elements.to_email.value) form.elements.to_email.value = em; });
+        box.addEventListener('click', function (ev) { var rm = ev.target.getAttribute && ev.target.getAttribute('data-rm'); if (rm != null) { lines = readLines(); lines.splice(Number(rm), 1); draw(); } });
+        m.querySelector('[data-addline]').addEventListener('click', function () { lines = readLines(); lines.push({ desc: '', detail: '', qty: 1, rate: '' }); draw(); });
+      }
+      form.addEventListener('submit', function (ev) {
+        ev.preventDefault();
+        var btn = form.querySelector('button[type=submit]');
+        if (sent) { var f = formData(form); return docCall(btn, 'saveInvoice', [{ number: d.number, due: f.due, notes: f.notes, to_email: f.to_email, subject: f.subject }], 'Saved', function () { closeModal(); openDoc(kind, d.number); }); }
+        var p = payload(), err = '';
+        if (!p.client) err = 'Choose or type the client.';
+        else if (!p.lines.length) err = 'Add at least one line.';
+        else if (p.to_email && !/^[^@\s]+@[^@\s]+\.[^@\s]+$/.test(p.to_email)) err = 'That email address doesn\'t look right.';
+        if (err) { $('form-err').textContent = err; return; }
+        docCall(btn, isInv ? 'saveInvoice' : 'saveQuote', [p], isNew ? 'Draft saved' : 'Draft updated', function (r) {
+          var nd = r && (r.invoice || r.quote); closeModal(); if (nd) openDoc(kind, nd.number);
+          if (isNew && p.client && !clientRowsAll().some(function (c) { return c.name === p.client; })) { state.data.clients = clientRowsAll().concat([{ name: p.client, type: 'One-off' }]); }
+        });
+      });
+    });
+  }
+
+  /* ----- email ----- */
+  function openEmailForm(kind, d) {
+    var isInv = kind === 'invoice', st = state.data.settings || {}, c = clientRow(d.client);
+    var amt = isInv ? num(d.total) - num(d.advance_applied) - num(d.paid_amount) : num(d.total);
+    var to = d.to_email || c.email || '';
+    var subject = (isInv ? 'Invoice ' : 'Quote ') + d.number + (d.subject ? ' · ' + d.subject : '') + ' · ' + (st.company_name || 'Offset Media');
+    var bodyText = 'Dear ' + (c.contact || d.client) + ',\n\n' + (isInv ? 'Please find attached invoice ' + d.number + ' for LKR ' + money(amt) + (d.due ? ', due on ' + d.due : '') + '.\n\nBank details are on the invoice. Please use ' + d.number + ' as the payment reference.'
+      : 'Please find attached our quote ' + d.number + ' for LKR ' + money(amt) + (d.valid_until ? ', valid until ' + d.valid_until : '') + '.\n\nLet us know if you would like any changes.') +
+      '\n\nThank you,\n' + (state.data.user.name || 'Joshua Abraham') + '\n' + (st.company_name || 'OFFSET MEDIA (PVT) LTD') + '\n' + (st.company_phone || '');
+    var body = '<form class="form" novalidate>' + field('To', input('to', to, 'type="email" required')) + field('Cc (optional)', input('cc', '', 'type="email"')) +
+      field('Subject', input('subject', subject)) + field('Message', '<textarea name="body" rows="9">' + esc(bodyText) + '</textarea>') +
+      '<label class="check"><input type="checkbox" name="saveEmail" ' + (c.email ? '' : 'checked') + '> Save this address on the client</label>' +
+      '<p class="note">The PDF' + (isInv ? '' : ' and your terms') + ' will be attached. ' + (d.status === 'draft' ? 'Sending marks it as sent' + (isInv ? ' and adds the income line to the books.' : '.') : '') + '</p>' +
+      '<p class="form-err" id="form-err" role="alert"></p><div class="modal-actions"><span class="spacer"></span><button class="pill ghost" type="button" data-close>Cancel</button><button class="pill" type="submit">Send email</button></div></form>';
+    openModal('Email ' + d.number, body, function (m) {
+      var form = m.querySelector('form');
+      form.addEventListener('submit', function (ev) {
+        ev.preventDefault();
+        var f = formData(form);
+        if (!/^[^@\s,;]+@[^@\s,;]+\.[^@\s,;]+$/.test(f.to)) { $('form-err').textContent = 'Enter one valid email address.'; return; }
+        docCall(form.querySelector('button[type=submit]'), 'sendDoc', [kind, d.number, { email: true, to: f.to, cc: f.cc, subject: f.subject, body: f.body, saveEmail: form.elements.saveEmail.checked }],
+          'Emailed to ' + f.to, function () { closeModal(); openDoc(kind, d.number); });
+      });
+    });
+  }
+
+  /* ----- payment ----- */
+  function openPaymentForm(d) {
+    var bal = num(d.total) - num(d.advance_applied) - num(d.paid_amount);
+    var body = '<form class="form" novalidate><p class="note">Balance on ' + esc(d.number) + ': <b>' + lkr(bal) + '</b></p>' +
+      '<div class="row2">' + field('Amount received', input('amount', Math.round(bal * 100) / 100, 'inputmode="decimal" required')) + field('Date received', input('date', todayIso(), 'type="date"')) + '</div>' +
+      field('How it was paid', select('method', pairs(['Bank transfer', 'Cheque', 'Cash', 'Debit card']), 'Bank transfer')) +
+      '<p class="form-err" id="form-err" role="alert"></p><div class="modal-actions"><span class="spacer"></span><button class="pill ghost" type="button" data-close>Cancel</button><button class="pill" type="submit">Record payment</button></div></form>';
+    openModal('Payment for ' + d.number, body, function (m) {
+      var form = m.querySelector('form');
+      form.addEventListener('submit', function (ev) {
+        ev.preventDefault();
+        var f = formData(form), a = num(f.amount);
+        if (!(a > 0)) { $('form-err').textContent = 'Enter the amount received.'; return; }
+        if (a > bal + 0.005) { $('form-err').textContent = 'That is more than the balance of ' + money(bal) + '.'; return; }
+        docCall(form.querySelector('button[type=submit]'), 'recordPayment', [d.number, { amount: a, date: f.date, method: f.method }], 'Payment recorded', function () { closeModal(); openDoc('invoice', d.number); });
+      });
+    });
   }
 
   /* ---------- more ---------- */
   function viewMore() {
     var u = state.data.user;
     var h = '<h1 class="page-title">More</h1><p class="sub">Signed in as ' + esc(u.name || u.email) + ' (' + esc(u.role) + ').</p>';
+    h += '<div class="grid morelinks"><button class="card linkcard" data-go="clients" type="button"><span class="label">People</span><b>Clients</b><span class="muted small">Contacts and full history</span></button>' +
+      '<button class="card linkcard" data-go="entries" type="button"><span class="label">Books</span><b>Entries</b><span class="muted small">Every cost and income line</span></button></div>';
     h += '<div class="card"><h3>Install Offset Books</h3><ol class="steps">' +
       '<li><b>iPhone:</b> open this page in Safari, tap Share, then <b>Add to Home Screen</b>.</li>' +
       '<li><b>Android:</b> in Chrome tap the menu, then <b>Install app</b>.</li>' +
@@ -553,12 +891,16 @@
     openBillForm(group);
   }
 
+  function knownProject(id) { return id && projectById(id) ? id : ''; }
+
   /**
    * One supplier bill (e.g. a TG rental invoice) divided across projects.
    * existing = entries the bill replaces (empty for a new bill).
+   * opts.review = a bill Claude read (from the review queue): adds the document preview, payment matching, approve / reject / skip.
    */
-  function openBillForm(existing, defaults) {
-    existing = existing || [];
+  function openBillForm(existing, defaults, opts) {
+    existing = existing || []; opts = opts || {};
+    var rv = opts.review, sg = rv ? (rv.suggestion || {}) : null;
     var first = existing[0] || {}, total = 0;
     existing.forEach(function (x) { total += num(x.amount); });
     var hdr = Object.assign({ date: todayIso(), payment_method: 'Bank transfer', paid_status: 'paid', paid_date: todayIso(), doc_status: 'invoice' }, defaults || {},
@@ -566,27 +908,48 @@
     var lines = existing.length ? existing.map(function (x) { return { project: x.project, shoot: x.shoot, cost_type: x.cost_type || 'Equipment rental', description: x.description, amount: num(x.amount) }; })
       : [{ project: state.view === 'project' ? state.projectId : '', shoot: '', cost_type: 'Equipment rental', description: '', amount: '' }];
     if (existing.length === 1 && !first.bill_id) lines.push({ project: '', shoot: '', cost_type: lines[0].cost_type, description: lines[0].description, amount: '' });
+    var payments = [], dupes = [];
+    if (rv) {
+      hdr = Object.assign(hdr, { date: sg.date || todayIso(), payee: sg.payee || sg.supplier || '', doc_number: sg.doc_number || '', notes: sg.notes || '', paid_status: 'unpaid', payment_method: 'Not paid yet', paid_date: '' });
+      total = num(sg.total);
+      lines = (sg.lines && sg.lines.length ? sg.lines : [{ amount: sg.total }]).map(function (l) {
+        return { project: knownProject(l.project), shoot: l.shoot || '', cost_type: costTypes().indexOf(l.cost_type) !== -1 ? l.cost_type : 'Equipment rental', description: l.description || '', amount: blank(l.amount) ? '' : num(l.amount), reason: l.reason || '' };
+      });
+      var m = sg.matches || {};
+      payments = (m.payments || []).map(findEntry).filter(Boolean);
+      dupes = (m.duplicates || []).map(findEntry).filter(Boolean);
+    }
 
-    var body = '<form id="bill-form" class="form" novalidate>' +
-      '<p class="note">Enter the bill once, then divide it between projects. Each line becomes a cost on that project; leave a line\'s project empty for company overhead.</p>' +
+    var pane = rv ? '<div class="review-doc"><div class="doc-frame" id="doc-frame"><div class="spinner"></div></div><a class="note" href="' + esc(sg.file_url) + '" target="_blank" rel="noopener">Open in Drive</a></div>' : '';
+    var aiNote = rv ? '<div class="ai-note"><span class="pillbadge ' + (sg.confidence === 'high' ? 'good' : sg.confidence === 'medium' ? '' : 'warn') + '">Claude: ' + esc(sg.confidence || 'unsure') + ' confidence</span>' +
+      (sg.notes ? ' <span class="muted small">' + esc(sg.notes) + '</span>' : '') + '</div>' +
+      (dupes.length ? '<div class="banner">Possible duplicate: ' + dupes.map(function (d) { return esc(d.id + ' ' + d.payee + ' ' + money0(d.amount) + ' on ' + d.date); }).join(', ') + ' already mention this invoice number.</div>' : '') +
+      field('This bill was paid by', '<select name="match"><option value="">Not matched to a bank payment yet (records it as owed)</option>' + payments.map(function (p, i) {
+        return '<option value="' + esc(p.id) + '"' + (i === 0 ? ' selected' : '') + '>' + esc(p.date + ' · ' + p.payee + ' · ' + money0(p.amount) + ' (' + p.id + ')') + '</option>';
+      }).join('') + '</select>') : '';
+
+    var body = '<form id="bill-form" class="form" novalidate>' + (rv ? '' : '<p class="note">Enter the bill once, then divide it between projects. Each line becomes a cost on that project; leave a line\'s project empty for company overhead.</p>') + aiNote +
       '<div class="row2">' + field('Supplier', input('payee', hdr.payee, 'list="dl-payees" autocomplete="off" required')) + field('Bill date', input('date', hdr.date, 'type="date" required')) + '</div>' +
-      '<div class="row2">' + field('Invoice no.', input('doc_number', hdr.doc_number)) + field('Bill total (LKR)', input('total', existing.length ? total : '', 'inputmode="decimal" required')) + '</div>' +
+      '<div class="row2">' + field('Invoice no.', input('doc_number', hdr.doc_number)) + field('Bill total (LKR)', input('total', total || '', 'inputmode="decimal" required')) + '</div>' +
       '<div class="row2">' + field('Paid by', select('payment_method', pairs(PAY_METHODS), hdr.payment_method)) + field('Status', select('paid_status', [['paid', 'Paid'], ['unpaid', 'Not paid yet']], hdr.paid_status)) + '</div>' +
-      '<div class="row2">' + field('Paid date', input('paid_date', hdr.paid_date, 'type="date"')) + field('Document link', input('doc_url', hdr.doc_url, 'type="url" placeholder="https://drive.google.com/..."')) + '</div>' +
+      '<div class="row2">' + field('Paid date', input('paid_date', hdr.paid_date, 'type="date"')) + (rv ? '<span></span>' : field('Document link', input('doc_url', hdr.doc_url, 'type="url" placeholder="https://drive.google.com/..."'))) + '</div>' +
       field('Notes', input('notes', hdr.notes)) +
       '<div class="label" style="margin-top:8px">How the bill is divided</div><div id="bill-lines"></div>' +
       '<div class="btns" style="margin:8px 0"><button class="pill ghost small" type="button" data-addline>Add line</button><button class="pill ghost small" type="button" data-even>Split evenly</button></div>' +
       '<div class="bill-sum" id="bill-sum"></div>' +
       '<p class="form-err" id="form-err" role="alert"></p>' +
-      '<div class="modal-actions"><span class="spacer"></span><button class="pill ghost" type="button" data-close>Cancel</button><button class="pill" type="submit" id="bill-save">Save bill</button></div>' +
+      '<div class="modal-actions">' + (rv ? '<button class="pill danger" type="button" data-reject>Reject</button><button class="pill ghost" type="button" data-skip>Skip</button>' : '') +
+      '<span class="spacer"></span><button class="pill ghost" type="button" data-close>' + (rv ? 'Close' : 'Cancel') + '</button><button class="pill" type="submit" id="bill-save">' + (rv ? 'Approve' : 'Save bill') + '</button></div>' +
       datalist('dl-payees', payees()) + datalist('dl-shoots', shoots('')) + '</form>';
+    var title = rv ? 'Review bill ' + (opts.index + 1) + ' of ' + opts.count : existing.length ? (first.bill_id ? 'Edit split bill' : 'Split ' + first.id + ' across projects') : 'Add split bill';
 
-    openModal(existing.length ? (first.bill_id ? 'Edit split bill' : 'Split ' + first.id + ' across projects') : 'Add split bill', body, function (m) {
+    openModal(title, rv ? '<div class="review-grid">' + pane + '<div>' + body + '</div></div>' : body, function (m) {
+      if (rv) m.querySelector('.modal').classList.add('wide');
       var form = m.querySelector('form'), box = $('bill-lines');
       function readLines() {
-        return Array.prototype.map.call(box.querySelectorAll('.bill-line'), function (row) {
+        return Array.prototype.map.call(box.querySelectorAll('.bill-line'), function (row, i) {
           return { project: row.querySelector('[name=l_project]').value, shoot: row.querySelector('[name=l_shoot]').value.trim(), cost_type: row.querySelector('[name=l_cost_type]').value,
-            description: row.querySelector('[name=l_description]').value.trim(), amount: row.querySelector('[name=l_amount]').value.trim() };
+            description: row.querySelector('[name=l_description]').value.trim(), amount: row.querySelector('[name=l_amount]').value.trim(), reason: (lines[i] || {}).reason || '' };
         });
       }
       function draw() {
@@ -595,6 +958,7 @@
             field('Amount', input('l_amount', l.amount, 'inputmode="decimal" placeholder="0"')) + '</div>' +
             '<div class="row3">' + field('Cost type', select('l_cost_type', pairs(costTypes()), l.cost_type)) + field('Shoot / day', input('l_shoot', l.shoot, 'list="dl-shoots"')) +
             field('What for', input('l_description', l.description)) + '</div>' +
+            (l.reason ? '<p class="reason">Claude: ' + esc(l.reason) + '</p>' : '') +
             (lines.length > 1 ? '<button class="linkbtn" type="button" data-rm="' + i + '">Remove line</button>' : '') + '</div>';
         }).join('');
         sum();
@@ -606,7 +970,13 @@
         $('bill-sum').innerHTML = 'Divided <b>' + money(s) + '</b> of ' + money(t) + ' · ' + (ok ? '<span class="good">adds up</span>' : '<span class="warn">' + (left > 0 ? money(left) + ' left to assign' : money(-left) + ' too much') + '</span>');
         $('bill-save').disabled = !ok;
       }
+      function applyMatch() {
+        var id = form.elements.match && form.elements.match.value, p = id && findEntry(id);
+        if (p) { form.elements.payment_method.value = p.payment_method || 'Bank transfer'; form.elements.paid_status.value = 'paid'; form.elements.paid_date.value = p.paid_date || p.date; }
+        else if (rv) { form.elements.payment_method.value = 'Not paid yet'; form.elements.paid_status.value = 'unpaid'; form.elements.paid_date.value = ''; }
+      }
       draw();
+      if (rv) { form.elements.match.addEventListener('change', applyMatch); applyMatch(); loadPreview(rv.id, $('doc-frame')); }
       box.addEventListener('input', sum);
       form.elements.total.addEventListener('input', sum);
       box.addEventListener('click', function (ev) {
@@ -621,6 +991,16 @@
         lines = readLines(); var t = num(form.elements.total.value), n = lines.length, each = Math.floor(t / n * 100) / 100, used = 0;
         lines.forEach(function (l, i) { l.amount = i === n - 1 ? Math.round((t - used) * 100) / 100 : each; used += each; }); draw();
       });
+      if (rv) {
+        m.querySelector('[data-skip]').addEventListener('click', function () { closeModal(); openReview(opts.index + 1); });
+        m.querySelector('[data-reject]').addEventListener('click', function (ev) {
+          var btn = ev.currentTarget;
+          if (btn.getAttribute('data-armed') !== '1') { btn.setAttribute('data-armed', '1'); btn.textContent = 'Tap again to reject'; return; }
+          closeModal();
+          commit(function () { removeReview(rv.id); }, function () { return api('obwDecideBill', [rv.id, 'reject']); }, null, 'Bill rejected');
+          openReview(opts.index);
+        });
+      }
       form.addEventListener('submit', function (ev) {
         ev.preventDefault();
         var d = formData(form), ls = readLines(), err = '';
@@ -628,21 +1008,99 @@
         else if (!isDate(d.date)) err = 'Pick the bill date.';
         else if (ls.some(function (l) { return l.amount === '' || !isFinite(num(l.amount)); })) err = 'Every line needs an amount.';
         if (err) { $('form-err').textContent = err; return; }
-        var header = { date: d.date, payee: d.payee, doc_number: d.doc_number, doc_url: d.doc_url, doc_status: d.doc_url ? 'invoice' : (hdr.doc_status || 'invoice'),
+        var header = { date: d.date, payee: d.payee, doc_number: d.doc_number, doc_url: d.doc_url || hdr.doc_url || '', doc_status: d.doc_url ? 'invoice' : (hdr.doc_status || 'invoice'),
           payment_method: d.payment_method, paid_status: d.paid_status, paid_date: d.paid_date, notes: d.notes, business_line: first.business_line || 'Production' };
         if (first.bank_line_id) header.bank_line_id = first.bank_line_id;
-        var payload = { replace_ids: existing.map(function (x) { return x.id; }), total: num(d.total), header: header,
+        var replace = rv ? (d.match ? [d.match] : []) : existing.map(function (x) { return x.id; });
+        var payload = { replace_ids: replace, total: num(d.total), header: header,
           lines: ls.map(function (l) { return { project: l.project, shoot: l.shoot, cost_type: l.cost_type, description: l.description || d.notes || ('Bill ' + (d.doc_number || '')).trim(), amount: num(l.amount) }; }) };
         var temps = payload.lines.map(function (l) {
           var x = Object.assign({ id: tmpId(), kind: 'cost' }, header, l, { bill_id: first.bill_id || 'new' });
           x.account = autoAccount(x); x.allocation = x.project ? '' : 'overhead'; return x;
         });
         closeModal();
-        commit(function () { removeEntries(payload.replace_ids); state.data.entries = state.data.entries.concat(temps); },
-          function () { return api('obwSaveBill', [payload]); },
-          function (res) { removeEntries(temps.map(function (t) { return t.id; })); state.data.entries = state.data.entries.concat(res.added); },
-          'Bill saved as ' + payload.lines.length + ' line' + (payload.lines.length === 1 ? '' : 's'));
+        var msg = 'Bill saved as ' + payload.lines.length + ' line' + (payload.lines.length === 1 ? '' : 's');
+        if (rv) {
+          commit(function () { removeReview(rv.id); removeEntries(replace); state.data.entries = state.data.entries.concat(temps); },
+            function () { return api('obwDecideBill', [rv.id, 'approve', payload]); },
+            function (res) { removeEntries(temps.map(function (t) { return t.id; })); state.data.entries = state.data.entries.concat(res.bill.added); }, 'Approved: ' + msg.toLowerCase());
+          openReview(opts.index);
+        } else {
+          commit(function () { removeEntries(payload.replace_ids); state.data.entries = state.data.entries.concat(temps); },
+            function () { return api('obwSaveBill', [payload]); },
+            function (res) { removeEntries(temps.map(function (t) { return t.id; })); state.data.entries = state.data.entries.concat(res.added); }, msg);
+        }
       });
+    });
+  }
+
+  /* ---------- bill review queue (bills Claude read) ---------- */
+  function reviews() { return (state.meta && state.meta.reviews) || []; }
+  function removeReview(id) { if (state.meta) state.meta.reviews = reviews().filter(function (r) { return r.id !== id; }); }
+  function openReview(i) {
+    var list = reviews();
+    if (!list.length) { closeModal(); toast('All bills reviewed'); return; }
+    if (i >= list.length) i = 0;
+    openBillForm([], {}, { review: list[i], index: i, count: list.length });
+  }
+  var previewCache = {};
+  function loadPreview(id, el) {
+    function put(f) {
+      if (!el || !document.body.contains(el)) return;
+      if (!f.data) { el.innerHTML = '<p class="muted">Too large to preview here. Use Open in Drive.</p>'; return; }
+      var bytes = atob(f.data), arr = new Uint8Array(bytes.length);
+      for (var i = 0; i < bytes.length; i++) arr[i] = bytes.charCodeAt(i);
+      var url = URL.createObjectURL(new Blob([arr], { type: f.mime }));
+      el.innerHTML = /^image\//.test(f.mime) ? '<img alt="Uploaded bill" src="' + url + '">' : '<iframe title="Uploaded bill" src="' + url + '"></iframe>';
+    }
+    if (previewCache[id]) return put(previewCache[id]);
+    api('obwBillFile', [id]).then(function (f) { previewCache[id] = f; put(f); }, function (e) { if (el) el.innerHTML = '<p class="muted">Preview unavailable: ' + esc(e.message) + '</p>'; });
+  }
+
+  /** Shrinks phone photos before upload (faster, and cheaper for Claude to read). */
+  function fileToPayload(file) {
+    return new Promise(function (resolve, reject) {
+      var r = new FileReader();
+      r.onerror = function () { reject(new Error('Could not read ' + file.name)); };
+      if (/^image\//.test(file.type) && file.type !== 'image/gif') {
+        r.onload = function () {
+          var img = new Image();
+          img.onload = function () {
+            var max = 2000, sc = Math.min(1, max / Math.max(img.width, img.height)), c = document.createElement('canvas');
+            c.width = Math.round(img.width * sc); c.height = Math.round(img.height * sc);
+            c.getContext('2d').drawImage(img, 0, 0, c.width, c.height);
+            resolve({ name: file.name.replace(/\.\w+$/, '') + '.jpg', mime: 'image/jpeg', data: c.toDataURL('image/jpeg', 0.85).split(',')[1] });
+          };
+          img.onerror = function () { reject(new Error(file.name + ' is not an image this browser can open (try a JPG or PDF).')); };
+          img.src = r.result;
+        };
+      } else {
+        r.onload = function () { resolve({ name: file.name, mime: file.type || 'application/pdf', data: String(r.result).split(',')[1] }); };
+      }
+      r.readAsDataURL(file);
+    });
+  }
+
+  var uploading = { total: 0, done: 0, failed: [] };
+  function uploadBills(files) {
+    files = Array.prototype.slice.call(files || []).filter(function (f) {
+      if (f.type !== 'application/pdf' && !/^image\//.test(f.type)) { toast(f.name + ' skipped: upload PDFs or photos', true); return false; }
+      if (f.size > 20 * 1024 * 1024) { toast(f.name + ' is over 20 MB', true); return false; }
+      return true;
+    });
+    if (!files.length) return;
+    uploading = { total: uploading.total - uploading.done + files.length, done: 0, failed: [] };
+    render(true);
+    var chain = Promise.resolve();
+    files.forEach(function (f) {
+      chain = chain.then(function () { return fileToPayload(f); }).then(function (p) { return api('obwUploadBill', [p]); })
+        .then(function (row) { if (state.meta) state.meta.reviews = reviews().concat([row]); }, function (e) { uploading.failed.push(f.name + ': ' + e.message); })
+        .then(function () { uploading.done++; render(true); });
+    });
+    chain.then(function () {
+      var ok = uploading.done - uploading.failed.length;
+      if (uploading.failed.length) toast(uploading.failed.join(' · '), true); else toast(ok + ' bill' + (ok === 1 ? '' : 's') + ' read. Ready to review.');
+      uploading = { total: 0, done: 0, failed: [] }; render(true);
     });
   }
 
@@ -701,32 +1159,42 @@
     var d = state.data; if (!d) return;
     var y = window.scrollY;
     $('who').innerHTML = '<b>' + esc(d.user.name || d.user.email) + '</b> · ' + esc(d.user.role);
-    var navView = state.view === 'project' ? 'projects' : state.view;
+    var navView = state.view === 'project' ? 'projects' : state.view === 'client' ? 'clients' : state.view;
     document.querySelectorAll('.nav-item').forEach(function (b) {
       var v = b.getAttribute('data-view');
       b.classList.toggle('active', v === navView);
-      if (v === 'assign') b.hidden = d.user.role !== 'admin';
+      if (v === 'review') b.hidden = d.user.role !== 'admin';
     });
-    var badge = $('assign-count'), n = canEdit() ? toAssign().length : 0;
+    var badge = $('assign-count'), n = canEdit() ? toAssign().length + reviews().length : 0;
     if (badge) { badge.textContent = n; badge.hidden = !n; }
     var v = state.view === 'project' ? viewProject() : state.view === 'projects' ? viewProjects() : state.view === 'entries' ? viewEntries() :
-      state.view === 'assign' ? viewAssign() : state.view === 'more' ? viewMore() : viewDashboard();
+      state.view === 'review' ? viewReview() : state.view === 'clients' ? viewClients() : state.view === 'client' ? viewClient() :
+      state.view === 'sales' ? viewSales() : state.view === 'more' ? viewMore() : viewDashboard();
     $('view').innerHTML = v;
     var so = $('btn-signout'); if (so) so.addEventListener('click', signOut);
     bindFilters();
+    bindUpload();
     window.scrollTo(0, keepScroll ? y : 0);
   }
 
   function bindFilters() {
-    var map = { 'f-q': 'q', 'f-kind': 'kind', 'f-month': 'month', 'f-project': 'project' };
+    var map = { 'f-q': 'q', 'f-kind': 'kind', 'f-month': 'month', 'f-project': 'project', 'd-q': 'q', 'd-status': 'status' };
     Object.keys(map).forEach(function (id) {
       var el = $(id); if (!el) return;
-      el.addEventListener(id === 'f-q' ? 'input' : 'change', function () {
-        state.entryFilter[map[id]] = el.value; state.entryLimit = 150;
+      el.addEventListener(/-q$/.test(id) ? 'input' : 'change', function () {
+        if (id.charAt(0) === 'd') docFilter[map[id]] = el.value; else { state.entryFilter[map[id]] = el.value; state.entryLimit = 150; }
         var pos = el.selectionStart; render(true);
-        var again = $(id); if (again) { again.focus(); if (id === 'f-q' && again.setSelectionRange) again.setSelectionRange(pos, pos); }
+        var again = $(id); if (again) { again.focus(); if (/-q$/.test(id) && again.setSelectionRange) again.setSelectionRange(pos, pos); }
       });
     });
+  }
+
+  function bindUpload() {
+    var inp = $('bill-files'), dz = $('dropzone'); if (!inp || !dz) return;
+    inp.addEventListener('change', function () { uploadBills(inp.files); inp.value = ''; });
+    ['dragenter', 'dragover'].forEach(function (t) { dz.addEventListener(t, function (e) { e.preventDefault(); dz.classList.add('over'); }); });
+    ['dragleave', 'drop'].forEach(function (t) { dz.addEventListener(t, function (e) { e.preventDefault(); dz.classList.remove('over'); }); });
+    dz.addEventListener('drop', function (e) { uploadBills(e.dataTransfer.files); });
   }
 
   function go(view, pid) { state.view = view; if (pid != null) state.projectId = pid; render(); }
@@ -739,6 +1207,9 @@
     if ((el = t.closest('[data-go]'))) return go(el.getAttribute('data-go'));
     if ((el = t.closest('[data-entry]'))) { var en = findEntry(el.getAttribute('data-entry')); if (en) openEntryForm(en); return; }
     if ((el = t.closest('[data-project]'))) return go('project', el.getAttribute('data-project'));
+    if ((el = t.closest('[data-client]'))) { state.clientName = el.getAttribute('data-client'); return go('client'); }
+    if ((el = t.closest('[data-review]'))) return openReview(Number(el.getAttribute('data-review')));
+    if ((el = t.closest('[data-doc]'))) { var dk = el.getAttribute('data-doc').split(':'); return openDoc(dk[0], dk.slice(1).join(':')); }
     if ((el = t.closest('[data-split]'))) { var se = findEntry(el.getAttribute('data-split')); if (se) openBillFor(se); return; }
     if ((el = t.closest('[data-overhead]'))) {
       var id = el.getAttribute('data-overhead'), oe = findEntry(id); if (!oe) return;
@@ -754,6 +1225,11 @@
       else if (a === 'add-cost') openEntryForm(null, { kind: 'cost', project: inProject, cost_type: 'Crew / freelancer' });
       else if (a === 'add-income') openEntryForm(null, { kind: 'income', project: inProject, cost_type: 'Full payment', payment_method: 'Bank transfer', paid_status: 'unpaid', paid_date: '', doc_status: 'invoice', payee: p ? p.client : '' });
       else if (a === 'add-bill') openBillForm([], {});
+      else if (a === 'start-review') openReview(0);
+      else if (a === 'new-invoice') openDocForm('invoice', null, state.view === 'client' ? { client: state.clientName } : (state.view === 'project' && p ? { client: p.client, project: p.id } : {}));
+      else if (a === 'new-quote') openDocForm('quote', null, state.view === 'client' ? { client: state.clientName } : (state.view === 'project' && p ? { client: p.client, project: p.id } : {}));
+      else if (a === 'new-client') openClientForm(null);
+      else if (a === 'edit-client') openClientForm(clientRow(state.clientName));
       else if (a === 'more-entries') { state.entryLimit += 300; render(true); }
     }
   }
@@ -780,11 +1256,11 @@
   document.addEventListener('keydown', function (e) {
     if (e.key === 'Escape' && $('modal')) { closeModal(); return; }
     if (e.key !== 'Enter' || $('modal')) return;
-    var r = e.target.closest && e.target.closest('[data-project],[data-entry]');
+    var r = e.target.closest && e.target.closest('[data-project],[data-entry],[data-client],[data-review],[data-doc]');
     if (r) onAction(r);
   });
   $('btn-refresh').addEventListener('click', function () { loadBoot().then(function () { toast('Refreshed'); }); });
-  window.addEventListener('beforeunload', function (e) { if (savingCount > 0) { e.preventDefault(); e.returnValue = ''; } });
+  window.addEventListener('beforeunload', function (e) { if (savingCount > 0 || uploading.total > 0) { e.preventDefault(); e.returnValue = ''; } });
 
   if ('serviceWorker' in navigator) window.addEventListener('load', function () { navigator.serviceWorker.register('sw.js').catch(function () { /* app still works without it */ }); });
   if (window.google && window.google.accounts) start();

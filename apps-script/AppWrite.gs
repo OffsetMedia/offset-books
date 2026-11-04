@@ -22,7 +22,11 @@ var OBW_ACTIONS = {
   obwSaveEntry: obwSaveEntry_,
   obwDeleteEntry: obwDeleteEntry_,
   obwSaveBill: obwSaveBill_,
-  obwSaveProject: obwSaveProject_
+  obwSaveProject: obwSaveProject_,
+  obwSaveClient: obwSaveClient_,
+  obwUploadBill: obwUploadBill_,
+  obwDecideBill: obwDecideBill_,
+  obwBillFile: obwBillFile_
 };
 
 // Fields the app may write. Anything else in a request is ignored.
@@ -189,7 +193,18 @@ function obwMeta_(user) {
   try { clients = obwTable_('Clients').rows.map(function (r) { return r.name; }).filter(String); } catch (x) { /* optional */ }
   var accounts = [];
   try { accounts = obwTable_('Accounts').rows.map(obwPublic_); } catch (x) { /* optional */ }
-  return { costTypes: map, clients: clients, accounts: accounts, extras: extras, canEdit: user.role === 'admin' };
+  var clientRows = [];
+  try { clientRows = obwTable_('Clients').rows.map(obwPublic_).filter(function (c) { return c.name; }); } catch (x) { /* optional */ }
+  var quotes = [];
+  try { quotes = obwTable_('Quotes').rows.map(obwPublic_).filter(function (q) { return q.number; }); } catch (x) { /* optional */ }
+  var reviews = [];
+  if (user.role === 'admin') {
+    try {
+      reviews = obwTable_('Approvals').rows.filter(function (a) { return a.source === 'bill_upload' && a.status === 'pending'; })
+        .map(function (a) { var o = obwPublic_(a); try { o.suggestion = JSON.parse(a.suggestion); } catch (x) { o.suggestion = {}; } return o; });
+    } catch (x) { /* optional */ }
+  }
+  return { costTypes: map, clients: clients, clientRows: clientRows, quotes: quotes, reviews: reviews, accounts: accounts, extras: extras, canEdit: user.role === 'admin' };
 }
 
 /** Adds (no id) or updates (with id) one cost or income line. */
@@ -210,6 +225,8 @@ function obwSaveEntry_(user, args) {
     OBW_ENTRY_FIELDS.forEach(function (f) { if (Object.prototype.hasOwnProperty.call(input, f)) next[f] = obwClean_(f, input[f]); });
     if (input.auto_account || !next.account) next.account = obwAutoAccount_(next, map) || next.account;
     obwValidateEntry_(next);
+    if (existing) obwAssertOpen_(existing.date);
+    obwAssertOpen_(next.date);
 
     if (existing) {
       var changes = [];
@@ -228,6 +245,16 @@ function obwSaveEntry_(user, args) {
   } finally { lock.releaseLock(); }
 }
 
+/** Same rule as Code.gs: entries in a month the accountant locked cannot change until the admin reopens it. */
+function obwAssertOpen_(date) {
+  var ym = String(date || '').slice(0, 7);
+  if (!/^\d{4}-\d{2}$/.test(ym)) return;
+  var rows = [];
+  try { rows = obwTable_('Months').rows; } catch (x) { return; }
+  var m = rows.filter(function (r) { return String(r.month).slice(0, 7) === ym; })[0];
+  if (m && String(m.status) === 'locked') throw obwErr_('The books for ' + ym + ' are locked. Reopen the month before changing it.');
+}
+
 function obwValidateEntry_(e) {
   if (!/^\d{4}-\d{2}-\d{2}$/.test(String(e.date))) throw obwErr_('Date must be YYYY-MM-DD.');
   if (['cost', 'income', 'asset', 'loan', 'transfer'].indexOf(String(e.kind)) === -1) throw obwErr_('Type must be cost or income.');
@@ -244,6 +271,7 @@ function obwDeleteEntry_(user, args) {
     var t = obwTable_('Entries');
     for (var i = 0; i < t.rows.length; i++) {
       if (String(t.rows[i].id) === id) {
+        obwAssertOpen_(t.rows[i].date);
         obwAudit_(user, 'Entries', id, '(deleted)', JSON.stringify(obwStrip_(t.rows[i], t.headers)), '', reason);
         t.sh.deleteRow(t.rows[i]._row);
         return { id: id };
@@ -277,6 +305,8 @@ function obwSaveBill_(user, args) {
     var map = obwCostMap_();
     var old = t.rows.filter(function (r) { return replace.indexOf(String(r.id)) !== -1; });
     if (old.length !== replace.length) throw obwErr_('Some of the lines being split were not found. Refresh and try again.');
+    old.forEach(function (r) { obwAssertOpen_(r.date); });
+    obwAssertOpen_(h.date || (old[0] && old[0].date));
 
     var billId = (old[0] && old[0].bill_id) || ('B' + Utilities.formatDate(new Date(), 'Asia/Colombo', 'yyMMddHHmmss'));
     var base = old[0] ? obwStrip_(old[0], t.headers) : {};
@@ -348,4 +378,295 @@ function obwSaveProject_(user, args) {
     }
     return obwStrip_(next, t.headers);
   } finally { lock.releaseLock(); }
+}
+
+
+/* ================= clients ================= */
+
+var OBW_CLIENT_FIELDS = ['type', 'contact', 'phone', 'email', 'notes'];
+
+/** Adds a client (no original_name) or updates a client's details (original_name = its current name). */
+function obwSaveClient_(user, args) {
+  obwRequireAdmin_(user);
+  var input = args[0] || {};
+  var lock = obwLock_();
+  try {
+    var t = obwTable_('Clients'), existing = null, key = String(input.original_name || '').trim();
+    if (key) {
+      for (var i = 0; i < t.rows.length; i++) if (String(t.rows[i].name).trim() === key) { existing = t.rows[i]; break; }
+      if (!existing) throw obwErr_('Client "' + key + '" was not found. Refresh and try again.');
+      if (input.name && String(input.name).trim() !== key) throw obwErr_('Renaming a client is not supported yet, because projects and invoices refer to the name.');
+    }
+    var next = existing ? obwStrip_(existing, t.headers) : {};
+    if (!existing) {
+      next.name = String(input.name || '').trim();
+      if (!next.name) throw obwErr_('Client name is required.');
+      if (t.rows.some(function (r) { return String(r.name).trim().toLowerCase() === next.name.toLowerCase(); })) throw obwErr_('A client called "' + next.name + '" already exists.');
+    }
+    OBW_CLIENT_FIELDS.forEach(function (f) { if (Object.prototype.hasOwnProperty.call(input, f) && t.headers.indexOf(f) !== -1) next[f] = obwClean_(f, input[f]); });
+    if (existing) {
+      var changes = t.headers.filter(function (h) { return String(existing[h] == null ? '' : existing[h]) !== String(next[h] == null ? '' : next[h]); });
+      if (changes.length) {
+        obwWriteCells_(t, existing._row, next, changes);
+        changes.forEach(function (h) { obwAudit_(user, 'Clients', next.name, h, existing[h], next[h], 'Edited in app'); });
+      }
+    } else {
+      t.sh.appendRow(obwRowArray_(t, next));
+      obwAudit_(user, 'Clients', next.name, '(new row)', '', JSON.stringify(next), 'Added in app');
+    }
+    return obwStrip_(next, t.headers);
+  } finally { lock.releaseLock(); }
+}
+
+/* ================= bills read by Claude ================= */
+
+var OBW_PRICES = { // USD per million tokens [input, output]
+  'claude-haiku-5-5': [0.10, 0.50],
+  'claude-sonnet-5-5': [2, 10]
+};
+
+function obwSettings_() {
+  var o = {};
+  obwTable_('Settings').rows.forEach(function (r) { if (r.key) o[r.key] = r.value; });
+  return o;
+}
+
+function obwClaudeKey_() {
+  var props = PropertiesService.getScriptProperties().getProperties();
+  var names = ['ANTHROPIC_API_KEY', 'CLAUDE_API_KEY', 'anthropic_api_key', 'claude_api_key', 'ANTHROPIC_KEY', 'CLAUDE_KEY'];
+  for (var i = 0; i < names.length; i++) if (props[names[i]]) return props[names[i]];
+  for (var k in props) if (/^sk-ant-/.test(String(props[k]))) return props[k];
+  throw obwErr_('No Claude API key found in Script Properties.');
+}
+
+function obwMonthSpend_() {
+  var month = Utilities.formatDate(new Date(), 'Asia/Colombo', 'yyyy-MM'), used = 0;
+  try { obwTable_('AIUsage').rows.forEach(function (r) { if (String(r.time).slice(0, 7) === month) used += Number(r.cost_usd) || 0; }); } catch (x) { /* none yet */ }
+  return used;
+}
+
+function obwCallClaude_(model, system, content, purpose) {
+  var res = UrlFetchApp.fetch('https://api.anthropic.com/v1/messages', {
+    method: 'post', contentType: 'application/json', muteHttpExceptions: true,
+    headers: { 'x-api-key': obwClaudeKey_(), 'anthropic-version': '2023-06-01' },
+    payload: JSON.stringify({ model: model, max_tokens: 2500, system: system, messages: [{ role: 'user', content: content }] })
+  });
+  var body = JSON.parse(res.getContentText() || '{}');
+  if (res.getResponseCode() !== 200) throw obwErr_('Claude could not read the document: ' + ((body.error && body.error.message) || res.getResponseCode()));
+  var u = body.usage || {}, price = OBW_PRICES[model] || [2, 10];
+  var cost = ((u.input_tokens || 0) * price[0] + (u.output_tokens || 0) * price[1]) / 1e6;
+  var sh = obwSs_().getSheetByName('AIUsage');
+  if (sh) sh.appendRow([obwNow_(), model, u.input_tokens || 0, u.output_tokens || 0, cost.toFixed(6), purpose]);
+  return (body.content || []).map(function (c) { return c.text || ''; }).join('');
+}
+
+function obwParseJson_(text) {
+  var a = text.indexOf('{'), b = text.lastIndexOf('}');
+  if (a === -1 || b <= a) return null;
+  try { return JSON.parse(text.slice(a, b + 1)); } catch (x) { return null; }
+}
+
+function obwCalendarLines_(settings) {
+  var out = [], ids = String(settings.calendar_ids || '').split(',').map(function (s) { return s.trim(); }).filter(String);
+  var start = new Date(Date.now() - 150 * 86400000), end = new Date(Date.now() + 30 * 86400000);
+  ids.forEach(function (id) {
+    try {
+      var cal = CalendarApp.getCalendarById(id); if (!cal) return;
+      cal.getEvents(start, end).forEach(function (ev) {
+        out.push(Utilities.formatDate(ev.getStartTime(), 'Asia/Colombo', 'yyyy-MM-dd') + ' | ' + ev.getTitle());
+      });
+    } catch (x) { /* calendar not shared or no permission: skip */ }
+  });
+  out.sort();
+  return out.slice(-250);
+}
+
+function obwBillContext_() {
+  var settings = obwSettings_(), entries = obwTable_('Entries').rows, projects = obwTable_('Projects').rows;
+  var payees = {}, history = [];
+  entries.forEach(function (e) { if (e.payee) payees[e.payee] = 1; });
+  entries.filter(function (e) { return e.kind === 'cost' && e.project; }).slice(-90).forEach(function (e) {
+    history.push([e.date, e.payee, e.project, e.shoot, e.cost_type, e.amount, e.description].join(' | '));
+  });
+  return {
+    settings: settings,
+    projects: projects.map(function (p) { return [p.id, p.name, p.client, p.start, p.end || '-', p.status].join(' | '); }),
+    payees: Object.keys(payees),
+    history: history,
+    calendar: obwCalendarLines_(settings),
+    costTypes: Object.keys(obwCostMap_())
+  };
+}
+
+function obwBillSystem_(ctx) {
+  return [
+    'You read supplier bills (invoices and receipts) for Offset Media (Pvt) Ltd, a photo and video production company in Sri Lanka. Amounts are LKR.',
+    'Return ONLY one JSON object, no other text, with this shape:',
+    '{"supplier": string (the name as printed), "payee": string (the matching name from KNOWN PAYEES if one fits, else the printed name),',
+    ' "doc_number": string, "date": "YYYY-MM-DD", "total": number, "currency": "LKR",',
+    ' "lines": [{"date": "YYYY-MM-DD" or "", "description": string, "amount": number, "cost_type": one of COST TYPES, "project": a project id like "P002" or "" for company overhead, "shoot": string, "reason": string}],',
+    ' "confidence": "high" | "medium" | "low", "notes": string}',
+    'Rules:',
+    '- The lines must add up exactly to the total. Group the bill\'s items into one line per project (and per shoot day when the bill lists days).',
+    '- Pick each line\'s project from the shoot calendar (what was shot on that date), the project dates, and how this supplier was split before (HISTORY). Rental houses like TG Camera bill per day.',
+    '- If you cannot tell which project a line belongs to, leave project "" and say why in reason. Never invent a project id.',
+    '- confidence is "low" if any amount, date or total is hard to read or the lines do not clearly map to projects.',
+    '- Payee aliases: ' + (ctx.settings.payee_aliases || ''),
+    '',
+    'COST TYPES: ' + ctx.costTypes.join(', '),
+    'PROJECTS (id | name | client | start | end | status):', ctx.projects.join('\n'),
+    'KNOWN PAYEES: ' + ctx.payees.join('; '),
+    'HISTORY of project costs (date | payee | project | shoot | cost type | amount | description):', ctx.history.join('\n'),
+    'SHOOT CALENDAR (date | event):', ctx.calendar.join('\n') || '(none available)'
+  ].join('\n');
+}
+
+function obwFolder_(parent, name) {
+  var it = parent.getFoldersByName(name);
+  return it.hasNext() ? it.next() : parent.createFolder(name);
+}
+
+function obwFyLabel_(dateStr) {
+  var d = dateStr ? new Date(dateStr + 'T00:00:00') : new Date(), y = d.getFullYear(), m = d.getMonth() + 1;
+  var start = m >= 4 ? y : y - 1;
+  return 'FY ' + start + '-' + String(start + 1).slice(2);
+}
+
+function obwBillsRoot_(settings, dateStr) {
+  var root = DriveApp.getFolderById(settings.drive_root_id);
+  return obwFolder_(obwFolder_(root, obwFyLabel_(dateStr)), 'Bills in');
+}
+
+/** Saves one uploaded bill to Drive, has Claude read it, and queues it for review. args[0] = {name, mime, data (base64)} */
+function obwUploadBill_(user, args) {
+  obwRequireAdmin_(user);
+  var f = args[0] || {};
+  if (!f.data) throw obwErr_('No file received.');
+  var mime = String(f.mime || '');
+  if (!/^application\/pdf$|^image\/(jpeg|png|webp|gif)$/.test(mime)) throw obwErr_('Upload a PDF or a photo (JPG or PNG).');
+  var settings = obwSettings_();
+  var budget = Number(settings.claude_monthly_budget_usd) || 4;
+  if (obwMonthSpend_() >= budget) throw obwErr_('This month\'s Claude budget (USD ' + budget + ') is used up. Raise claude_monthly_budget_usd in Settings to keep reading bills.');
+
+  var blob = Utilities.newBlob(Utilities.base64Decode(f.data), mime, f.name || ('bill.' + (mime === 'application/pdf' ? 'pdf' : 'jpg')));
+  var file = obwFolder_(obwBillsRoot_(settings, ''), '_To review').createFile(blob);
+
+  var ctx = obwBillContext_(), system = obwBillSystem_(ctx);
+  var doc = mime === 'application/pdf'
+    ? { type: 'document', source: { type: 'base64', media_type: 'application/pdf', data: f.data } }
+    : { type: 'image', source: { type: 'base64', media_type: mime, data: f.data } };
+  var content = [doc, { type: 'text', text: 'Read this bill and return the JSON.' }];
+  var fast = settings.claude_model_fast || 'claude-haiku-5-5', strong = settings.claude_model_strong || 'claude-sonnet-5-5';
+
+  var model = fast, s = obwParseJson_(obwCallClaude_(fast, system, content, 'read bill ' + file.getName()));
+  if (!obwBillOk_(s) && obwMonthSpend_() < budget) {
+    model = strong;
+    var s2 = obwParseJson_(obwCallClaude_(strong, system, content, 'read bill (second opinion) ' + file.getName()));
+    if (s2) s = s2;
+  }
+  s = s || { lines: [], confidence: 'low', notes: 'Claude could not read this document. Fill it in by hand.' };
+  s.model = model;
+  s.file_id = file.getId();
+  s.file_url = file.getUrl();
+  s.file_name = file.getName();
+  s.mime = mime;
+  s.matches = obwBillMatches_(s);
+
+  var lock = obwLock_();
+  try {
+    var t = obwTable_('Approvals');
+    var id = obwNextId_(t.rows, 'AP', 4), first = (s.lines && s.lines[0]) || {};
+    var row = { id: id, bank_line: '', suggestion: JSON.stringify(s), status: 'pending', created_at: obwNow_(), source: 'bill_upload',
+      submitted_by: user.email, submitted_at: obwNow_(), kind: 'cost', date: s.date || '', amount: s.total || '', payee: s.payee || s.supplier || '',
+      description: (s.doc_number ? s.doc_number + ' ' : '') + (first.description || ''), project: first.project || '' };
+    t.sh.appendRow(obwRowArray_(t, row));
+    row.suggestion = s;
+    return row;
+  } finally { lock.releaseLock(); }
+}
+
+function obwBillOk_(s) {
+  if (!s || !s.lines || !s.lines.length || !isFinite(Number(s.total))) return false;
+  var sum = 0; s.lines.forEach(function (l) { sum += Number(l.amount) || 0; });
+  return Math.abs(sum - Number(s.total)) < 0.01 && s.confidence !== 'low';
+}
+
+/** Possible duplicates (same invoice number already booked) and bank payments this bill may belong to. */
+function obwBillMatches_(s) {
+  var entries = obwTable_('Entries').rows, out = { duplicates: [], payments: [] };
+  var doc = String(s.doc_number || '').trim().toLowerCase(), total = Number(s.total) || 0;
+  var word = String(s.payee || s.supplier || '').toLowerCase().split(/[\s(]/)[0];
+  var bd = s.date ? new Date(s.date + 'T00:00:00').getTime() : 0;
+  entries.forEach(function (e) {
+    if (e.kind !== 'cost') return;
+    var hay = (String(e.doc_number) + ' ' + String(e.doc_status) + ' ' + String(e.description) + ' ' + String(e.notes)).toLowerCase();
+    if (doc && doc.length >= 3 && hay.indexOf(doc) !== -1) out.duplicates.push(e.id);
+    var amt = Number(String(e.amount).replace(/,/g, '')) || 0;
+    var ed = e.date ? new Date(e.date + 'T00:00:00').getTime() : 0;
+    var near = !bd || !ed || (ed - bd > -5 * 86400000 && ed - bd < 45 * 86400000);
+    var samePayee = word && String(e.payee).toLowerCase().indexOf(word) !== -1;
+    if (!e.doc_url && near && total && Math.abs(amt - total) < 1 && (samePayee || !e.project)) out.payments.push(e.id);
+  });
+  out.payments = out.payments.slice(0, 5);
+  return out;
+}
+
+/**
+ * Approve or reject a bill Claude read.
+ * args = [approvalId, 'approve' | 'reject', billPayload (same shape as obwSaveBill, for approve)]
+ */
+function obwDecideBill_(user, args) {
+  obwRequireAdmin_(user);
+  var id = String(args[0] || ''), decision = args[1], bill = args[2] || {};
+  var t = obwTable_('Approvals'), a = null;
+  for (var i = 0; i < t.rows.length; i++) if (String(t.rows[i].id) === id) { a = t.rows[i]; break; }
+  if (!a) throw obwErr_('Review item ' + id + ' was not found. Refresh and try again.');
+  if (a.status !== 'pending') throw obwErr_('This bill was already ' + a.status + '.');
+  var s = {}; try { s = JSON.parse(a.suggestion); } catch (x) { /* keep empty */ }
+  var settings = obwSettings_(), result = null, file = null;
+  try { file = DriveApp.getFileById(s.file_id); } catch (x) { /* file gone */ }
+
+  if (decision === 'approve') {
+    bill.header = bill.header || {};
+    if (file) { bill.header.doc_url = file.getUrl(); bill.header.doc_status = 'invoice'; }
+    result = obwSaveBill_(user, [bill, 'Bill ' + (bill.header.doc_number || '') + ' approved from upload ' + id]);
+    if (file) {
+      try {
+        var h = bill.header, first = (bill.lines && bill.lines[0]) || {};
+        var typeFolder = { 'Equipment rental': 'Rentals', 'Crew / freelancer': 'Crew', 'Location & venue': 'Studios', 'Other': 'Props' }[first.cost_type] || 'Other';
+        var supplier = String(h.payee || 'Supplier').replace(/[\\\/:*?"<>|]/g, '').trim();
+        var dest = obwFolder_(obwFolder_(obwBillsRoot_(settings, h.date), typeFolder), supplier);
+        var ext = (String(s.file_name || '').match(/\.[a-z0-9]+$/i) || ['.pdf'])[0];
+        file.setName([h.date, supplier.replace(/\s+/g, ''), String(h.doc_number || 'nodoc').replace(/[\\\/:*?"<>|\s]/g, ''), Math.round(Number(bill.total) || 0)].join('_') + ext);
+        file.moveTo(dest);
+      } catch (x) { /* filing is best-effort; the entry still links the file */ }
+    }
+  } else if (decision === 'reject') {
+    if (file) { try { file.moveTo(obwFolder_(obwBillsRoot_(settings, ''), '_Rejected')); } catch (x) { /* ignore */ } }
+  } else throw obwErr_('Unknown decision.');
+
+  var lock = obwLock_();
+  try {
+    t = obwTable_('Approvals');
+    for (var j = 0; j < t.rows.length; j++) if (String(t.rows[j].id) === id) {
+      var r = t.rows[j], next = obwStrip_(r, t.headers);
+      next.status = decision === 'approve' ? 'approved' : 'rejected';
+      next.decided_by = user.email; next.decided_at = obwNow_();
+      if (result) { s.result = { bill_id: result.bill_id, entries: result.added.map(function (e) { return e.id; }) }; next.suggestion = JSON.stringify(s); }
+      obwWriteCells_(t, r._row, next, ['status', 'decided_by', 'decided_at', 'suggestion']);
+      obwAudit_(user, 'Approvals', id, 'status', 'pending', next.status, 'Bill review');
+      break;
+    }
+  } finally { lock.releaseLock(); }
+  return { id: id, status: decision === 'approve' ? 'approved' : 'rejected', bill: result };
+}
+
+/** Returns an uploaded bill's file (base64) for the review preview. Only files queued for review can be fetched. */
+function obwBillFile_(user, args) {
+  obwRequireAdmin_(user);
+  var id = String(args[0] || ''), a = obwTable_('Approvals').rows.filter(function (r) { return String(r.id) === id && r.source === 'bill_upload'; })[0];
+  if (!a) throw obwErr_('Review item not found.');
+  var s = JSON.parse(a.suggestion || '{}'), file = DriveApp.getFileById(s.file_id), blob = file.getBlob();
+  if (blob.getBytes().length > 15 * 1024 * 1024) return { url: file.getUrl(), mime: blob.getContentType(), data: '' };
+  return { url: file.getUrl(), mime: blob.getContentType(), data: Utilities.base64Encode(blob.getBytes()) };
 }
