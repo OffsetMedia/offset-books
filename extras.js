@@ -75,10 +75,33 @@
     var items = NAV.filter(function (n) { return n.sec && n.roles.indexOf(ROLE) >= 0; });
     return '<div class="head"><div><span class="mono">Offset Books</span><h1>More</h1></div></div>' +
       '<div class="obx-more">' + items.map(function (n) { return '<a class="card obx-link" data-view="' + n.id + '" tabindex="0">' + OBX.icon(n.id) + '<b>' + e_(n.label) + '</b></a>'; }).join('') + '</div>' +
+      '<div class="card" style="margin-top:14px"><span class="mono">Theme</span><div style="margin-top:10px">' + themeSeg() + '</div></div>' +
       '<div class="card" style="margin-top:14px"><span class="mono">Signed in</span><p style="margin:8px 0 12px">' + e_(DATA.user.name || DATA.user.email) + ' · ' + e_(ROLE) + '</p>' +
       '<div class="btnrow"><button class="btn" data-obx="refresh">Refresh data</button><button class="btn" data-obx="signout">Sign out</button></div>' +
       '<p class="note" style="margin-top:12px">To install: iPhone, Safari › Share › Add to Home Screen. Mac or PC, Chrome or Edge › Install Offset Books.</p></div>';
   };
+
+
+  /* ---------- light / dark theme ---------- */
+  function savedTheme() { try { return localStorage.getItem('ob_theme') || 'dark'; } catch (x) { return 'dark'; } }
+  function applyTheme(pref) {
+    var t = pref === 'auto' ? ((window.matchMedia && matchMedia('(prefers-color-scheme: light)').matches) ? 'light' : 'dark') : pref;
+    document.documentElement.setAttribute('data-theme', t);
+    var m = document.querySelector('meta[name=theme-color]'); if (m) m.setAttribute('content', t === 'light' ? '#F5F3FA' : '#07060D');
+  }
+  OBX.setTheme = function (pref) { try { localStorage.setItem('ob_theme', pref); } catch (x) { /* ignore */ } applyTheme(pref); if (window.state) go(state.view); };
+  if (window.matchMedia) { try { matchMedia('(prefers-color-scheme: light)').addEventListener('change', function () { if (savedTheme() === 'auto') applyTheme('auto'); }); } catch (x) { /* old Safari */ } }
+  OBX.themeToggle = function () {
+    var light = document.documentElement.getAttribute('data-theme') === 'light';
+    return '<button class="obx-themebtn" data-obx="theme-flip" title="' + (light ? 'Switch to dark' : 'Switch to light') + '" aria-label="' + (light ? 'Switch to dark theme' : 'Switch to light theme') + '">' +
+      (light ? '<svg viewBox="0 0 24 24" aria-hidden="true"><path d="M20 14.5A8 8 0 0 1 9.5 4a8 8 0 1 0 10.5 10.5z"/></svg>' : '<svg viewBox="0 0 24 24" aria-hidden="true"><circle cx="12" cy="12" r="4"/><path d="M12 2v2M12 20v2M2 12h2M20 12h2M4.9 4.9l1.4 1.4M17.7 17.7l1.4 1.4M4.9 19.1l1.4-1.4M17.7 6.3l1.4-1.4"/></svg>') +
+      '<span>' + (light ? 'Dark' : 'Light') + '</span></button>';
+  };
+  function themeSeg() {
+    var p = savedTheme();
+    return '<div class="obx-seg" role="group" aria-label="Theme">' + [['dark', 'Dark'], ['light', 'Light'], ['auto', 'Match device']].map(function (o) {
+      return '<button class="chip' + (p === o[0] ? ' on' : '') + '" data-obx="theme" data-theme-pref="' + o[0] + '">' + o[1] + '</button>'; }).join('') + '</div>';
+  }
 
   /* ---------- bills read by Claude ---------- */
   var parsed = {};
@@ -612,6 +635,8 @@
     else if (a === 'goai') { state.etab = 'ai'; go('entries'); }
     else if (a === 'runcheck') runCheck('manual', el);
     else if (a === 'refresh') refresh();
+    else if (a === 'theme-flip') OBX.setTheme(document.documentElement.getAttribute('data-theme') === 'light' ? 'dark' : 'light');
+    else if (a === 'theme') OBX.setTheme(el.getAttribute('data-theme-pref'));
     else if (a === 'signout') window.OBSignOut && window.OBSignOut();
     else if (el.hasAttribute('data-obxbill')) { var b = DATA.entries.filter(function (x) { return x.bill_id === el.getAttribute('data-obxbill'); })[0]; if (b) OBX.openBillFor(b); }
     else if (el.hasAttribute('data-obxrev')) OBX.review(Number(el.getAttribute('data-obxrev')));

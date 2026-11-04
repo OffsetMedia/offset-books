@@ -111,7 +111,7 @@ function renderNav(){
       var nb=n.id==='entries'&&ROLE==='admin'?pendingItems().length+OBX.reviews().length:(n.id==='inbox'?OBX.unread():0);
       var badge=nb?'<span class="navbadge">'+nb+'</span>':'';
       return '<a data-view="'+n.id+'" class="'+(cur===n.id||(n.id==='more'&&OBX.isSecondary(cur))?'on':'')+(n.sec?' nsec':'')+(n.phone?' phoneonly':'')+'" tabindex="0">'+OBX.icon(n.id)+'<span class="lbl">'+esc(n.label)+'</span>'+badge+'</a>';}).join('')+
-    '<div class="who"><b>'+esc(DATA.user.name)+'</b>'+esc(ROLE)+' · <a style="display:inline;padding:0;color:var(--cobalt)" id="refresh" tabindex="0">refresh</a></div>';
+    '<div class="who"><b>'+esc(DATA.user.name)+'</b>'+esc(ROLE)+' · <a style="display:inline;padding:0;color:var(--cobalt)" id="refresh" tabindex="0">refresh</a>'+OBX.themeToggle()+'</div>';
 }
 function go(v){
   state.view=v; renderNav();
