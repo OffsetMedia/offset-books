@@ -88,8 +88,8 @@ function budgetBar(s){
 
 /* ---------- navigation ---------- */
 var NAV = [
-  {id:'dashboard',label:'Dashboard',roles:['admin','viewer','accountant']},
-  {id:'inbox',label:'Inbox',roles:['admin']},
+  {id:'dashboard',label:'Dashboard',short:'Home',roles:['admin','viewer','accountant']},
+  {id:'inbox',label:'Inbox',roles:['admin'],deskonly:1},
   {id:'projects',label:'Projects',roles:['admin','viewer','accountant']},
   {id:'entries',label:'Entries',roles:['admin','viewer','accountant']},
   {sec:1,id:'vendors',label:'Vendors',roles:['admin','accountant']},
@@ -110,13 +110,14 @@ function renderNav(){
     items.map(function(n){
       var nb=n.id==='entries'&&ROLE==='admin'?pendingItems().length+OBX.reviews().length:(n.id==='inbox'?OBX.unread():0);
       var badge=nb?'<span class="navbadge">'+nb+'</span>':'';
-      return '<a data-view="'+n.id+'" class="'+(cur===n.id||(n.id==='more'&&OBX.isSecondary(cur))?'on':'')+(n.sec?' nsec':'')+(n.phone?' phoneonly':'')+'" tabindex="0">'+OBX.icon(n.id)+'<span class="lbl">'+esc(n.label)+'</span>'+badge+'</a>';}).join('')+
+      return '<a data-view="'+n.id+'" class="'+(cur===n.id||(n.id==='more'&&OBX.isSecondary(cur))?'on':'')+(n.sec?' nsec':'')+(n.phone?' phoneonly':'')+(n.deskonly?' deskonly':'')+'" tabindex="0">'+OBX.icon(n.id)+'<span class="lbl">'+esc(n.label)+'</span>'+(n.short?'<span class="lbl-s">'+esc(n.short)+'</span>':'')+badge+'</a>';}).join('')+
     '<div class="who"><b>'+esc(DATA.user.name)+'</b>'+esc(ROLE)+' · <a style="display:inline;padding:0;color:var(--cobalt)" id="refresh" tabindex="0">refresh</a>'+OBX.themeToggle()+'</div>';
 }
 function go(v){
   state.view=v; renderNav();
   var f={inbox:OBX.vInbox,more:OBX.vMore,dashboard:vDashboard,books:vBooks,projects:vProjects,project:vProject,entries:vEntries,bank:vBank,acct:vAcct,pay:vPay,vendors:vVendors,docs:vDocs,doc:vDoc,edit:vEdit,clients:vClients,crew:vCrew,settings:vSettings}[v];
   document.getElementById('main').innerHTML='<div class="phone-logo"><span class="w">OFFSET</span></div>'+f();
+  OBX.afterGo(v);
   window.scrollTo(0,0);
   if(v==='edit') edPreview(0); else if(v==='doc') loadDocPreview();
 }

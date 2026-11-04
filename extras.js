@@ -72,13 +72,14 @@
   OBX.isSecondary = function (v) { return SECONDARY.indexOf(v) !== -1 && window.innerWidth <= 820; };
 
   OBX.vMore = function () {
-    var items = NAV.filter(function (n) { return n.sec && n.roles.indexOf(ROLE) >= 0; });
+    var items = NAV.filter(function (n) { return (n.sec || n.deskonly) && n.roles.indexOf(ROLE) >= 0; });
+    var chev = '<svg class="gl-chev" viewBox="0 0 24 24" aria-hidden="true"><path d="M9 6l6 6-6 6"/></svg>';
     return '<div class="head"><div><span class="mono">Offset Books</span><h1>More</h1></div></div>' +
-      '<div class="obx-more">' + items.map(function (n) { return '<a class="card obx-link" data-view="' + n.id + '" tabindex="0">' + OBX.icon(n.id) + '<b>' + e_(n.label) + '</b></a>'; }).join('') + '</div>' +
-      '<div class="card" style="margin-top:14px"><span class="mono">Theme</span><div style="margin-top:10px">' + themeSeg() + '</div></div>' +
-      '<div class="card" style="margin-top:14px"><span class="mono">Signed in</span><p style="margin:8px 0 12px">' + e_(DATA.user.name || DATA.user.email) + ' · ' + e_(ROLE) + '</p>' +
-      '<div class="btnrow"><button class="btn" data-obx="refresh">Refresh data</button><button class="btn" data-obx="signout">Sign out</button></div>' +
-      '<p class="note" style="margin-top:12px">To install: iPhone, Safari › Share › Add to Home Screen. Mac or PC, Chrome or Edge › Install Offset Books.</p></div>';
+      '<div class="gl-group">' + items.map(function (n) { return '<a class="gl-row" data-view="' + n.id + '" tabindex="0"><span class="gl-ico">' + OBX.icon(n.id) + '</span><span class="gl-lbl">' + e_(n.label) + '</span>' + (n.id === 'inbox' && OBX.unread() ? '<span class="navbadge">' + OBX.unread() + '</span>' : '') + chev + '</a>'; }).join('') + '</div>' +
+      '<div class="gl-title">Appearance</div><div class="gl-group gl-pad">' + themeSeg() + '</div>' +
+      '<div class="gl-title">Account</div><div class="gl-group"><div class="gl-row gl-static"><span class="gl-lbl">' + e_(DATA.user.name || DATA.user.email) + '<small>' + e_(DATA.user.email) + ' · ' + e_(ROLE) + '</small></span></div>' +
+      '<button class="gl-row" data-obx="refresh"><span class="gl-lbl">Refresh data</span>' + chev + '</button><button class="gl-row gl-danger" data-obx="signout"><span class="gl-lbl">Sign out</span></button></div>' +
+      '<p class="note gl-foot">Install: on iPhone, Safari › Share › Add to Home Screen. On a Mac or PC, Chrome or Edge › Install Offset Books.</p>';
   };
 
 
@@ -103,6 +104,49 @@
     return '<div class="obx-seg" role="group" aria-label="Theme">' + [['dark', 'Dark'], ['light', 'Light'], ['auto', 'Match device']].map(function (o) {
       return '<button class="chip' + (p === o[0] ? ' on' : '') + '" data-obx="theme" data-theme-pref="' + o[0] + '">' + o[1] + '</button>'; }).join('') + '</div>';
   }
+
+
+  /* ---------- phone: app bar, list rows, quick create, grouped More ---------- */
+  var TITLES = { dashboard: 'Home', inbox: 'Inbox', projects: 'Projects', project: 'Project', entries: 'Entries', vendors: 'Vendors', bank: 'Bank', pay: 'Payments', docs: 'Invoices', doc: 'Invoice', edit: 'Editor', clients: 'Clients', crew: 'Crew', settings: 'Settings', more: 'More' };
+  function ensureAppBar() {
+    if ($('obx-appbar')) return;
+    var bar = document.createElement('header'); bar.id = 'obx-appbar';
+    bar.innerHTML = '<div class="ab-brand"><span class="ab-mark" aria-hidden="true">O</span><span class="ab-txt"><span class="ab-co">Offset Books</span><b id="ab-title">Home</b></span></div>' +
+      '<div class="ab-actions">' + (admin() ? '<button class="ab-btn" data-view="inbox" aria-label="Claude inbox"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M6 16V11a6 6 0 1 1 12 0v5l1.5 2h-15z"/><path d="M10 20.5a2 2 0 0 0 4 0"/></svg><span class="ab-dot" id="ab-dot" hidden></span></button>' : '') + '</div>';
+    var shell = $('shell'); shell.insertBefore(bar, shell.firstChild);
+  }
+  function updateAppBar(v) {
+    ensureAppBar();
+    var t = $('ab-title'); if (t) t.textContent = TITLES[v] || 'Offset Books';
+    var dot = $('ab-dot'), n = OBX.unread(); if (dot) { dot.hidden = !n; dot.textContent = n > 9 ? '9+' : n; }
+    var bell = document.querySelector('#obx-appbar [data-view=inbox]'); if (bell) bell.classList.toggle('on', v === 'inbox');
+  }
+  /** Runs after every page draws: tags list cells so phones can show tables as clean rows. */
+  OBX.afterGo = function (v) {
+    document.body.setAttribute('data-obview', v);
+    updateAppBar(v);
+    Array.prototype.forEach.call(document.querySelectorAll('#main .tablewrap table'), function (t) {
+      if (t.classList.contains('kv')) return;
+      var heads = Array.prototype.map.call(t.querySelectorAll('thead th'), function (th) { return th.textContent.trim(); });
+      Array.prototype.forEach.call(t.querySelectorAll('tbody tr'), function (tr) {
+        var cells = Array.prototype.slice.call(tr.children); if (cells.length < 2) { tr.classList.add('lr-full'); return; }
+        tr.classList.add('lr');
+        var title = tr.querySelector('td.name') || cells.filter(function (td) { return td.querySelector('b') && !td.classList.contains('r'); })[0] || cells[0];
+        var pri = tr.querySelector('td.amt') || tr.querySelector('td.r');
+        cells.forEach(function (td, i) {
+          if (heads[i]) td.setAttribute('data-label', heads[i]);
+          td.classList.toggle('lr-t', td === title); td.classList.toggle('lr-p', td === pri && td !== title);
+        });
+      });
+    });
+  };
+  OBX.quickCreate = function () {
+    if (!admin()) return '';
+    var I = { inv: '<path d="M6 3h9l4 4v14H6z"/><path d="M14.5 3v4.5H19M9 12h7M9 16h5"/>', qt: '<path d="M6 3h12v18H6z"/><path d="M9 8h6M9 12h6M9 16h3"/>', cost: '<path d="M6 3h12v18l-3-2-3 2-3-2-3 2z"/><path d="M9 9h6M9 13h4"/>', up: '<path d="M12 16V4M7 9l5-5 5 5"/><path d="M4 16v4h16v-4"/>' };
+    function tile(icon, label, attrs) { return '<button class="qc-tile" ' + attrs + '><span class="qc-ico"><svg viewBox="0 0 24 24" aria-hidden="true">' + I[icon] + '</svg></span><span>' + label + '</span></button>'; }
+    return '<section class="qc phoneonly-b"><div class="qc-h"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M13 2L4 14h7l-1 8 9-12h-7z"/></svg>Quick create</div><div class="qc-row">' +
+      tile('inv', 'Invoice', 'data-act="new-inv"') + tile('qt', 'Quote', 'data-act="new-qt"') + tile('cost', 'Cost', 'data-act="new-entry"') + tile('up', 'Upload bills', 'data-obx="upload"') + '</div></section>';
+  };
 
   /* ---------- bills read by Claude ---------- */
   var parsed = {};
@@ -366,7 +410,7 @@
 
   OBX.dashBanner = function () {
     if (!admin()) return '';
-    var h = '', m = inbox.messages[0], nr = OBX.reviews().length;
+    var h = OBX.quickCreate(), m = inbox.messages[0], nr = OBX.reviews().length;
     if (m && m.status === 'unread' && (m.issues || []).length) h += '<button class="obx-banner" data-view="inbox"><span class="tag late">Claude</span><span><b>' + e_(m.title) + '.</b> ' + e_(String(m.body || '').slice(0, 140)) + (String(m.body || '').length > 140 ? '…' : '') + '</span><span class="obx-go">Open inbox ›</span></button>';
     if (nr) h += '<button class="obx-banner" data-obx="goai"><span class="tag info">Bills</span><span><b>' + nr + ' bill' + (nr === 1 ? '' : 's') + '</b> read by Claude ' + (nr === 1 ? 'is' : 'are') + ' waiting for your approval.</span><span class="obx-go">Review ›</span></button>';
     return h;
