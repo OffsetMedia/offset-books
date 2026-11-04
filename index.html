@@ -46,11 +46,14 @@
     <div class="nav-brand wordmark">OFFSET <span class="media">MEDIA</span></div>
     <button class="nav-item" data-view="dashboard"><span class="ico">&#9638;</span><span>Dashboard</span></button>
     <button class="nav-item" data-view="projects"><span class="ico">&#9776;</span><span>Projects</span></button>
+    <button class="nav-item" data-view="entries"><span class="ico">&#8645;</span><span>Entries</span></button>
+    <button class="nav-item" data-view="assign" hidden><span class="ico">&#9873;</span><span>To assign</span><span class="navbadge" id="assign-count" hidden></span></button>
     <button class="nav-item" data-view="more"><span class="ico">&#8943;</span><span>More</span></button>
   </nav>
   <main class="main">
     <header class="topbar">
       <div class="who" id="who"></div>
+      <span class="saving" id="saving" hidden>Saving&hellip;</span>
       <button class="pill ghost" id="btn-refresh" type="button">Refresh</button>
     </header>
     <div id="view"></div>
