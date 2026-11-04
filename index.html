@@ -1,0 +1,66 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>Offset Books</title>
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<meta name="theme-color" content="#07060D">
+<meta name="apple-mobile-web-app-capable" content="yes">
+<meta name="mobile-web-app-capable" content="yes">
+<meta name="apple-mobile-web-app-status-bar-style" content="black">
+<meta name="apple-mobile-web-app-title" content="Offset Books">
+<link rel="manifest" href="manifest.webmanifest">
+<link rel="apple-touch-icon" href="icons/apple-touch-icon.png">
+<link rel="icon" type="image/png" href="icons/icon-192.png">
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=Big+Shoulders+Display:wght@600;800&family=Inter+Tight:wght@400;500;600&family=JetBrains+Mono:wght@500&display=swap" rel="stylesheet">
+<link rel="stylesheet" href="styles.css">
+</head>
+<body>
+
+<section id="screen-signin" class="screen center" hidden>
+  <div class="signin-card">
+    <div class="wordmark">OFFSET <span class="media">MEDIA</span></div>
+    <h1>Offset Books</h1>
+    <p class="muted">Sign in with your Offset Media Google account.</p>
+    <div id="g-button" class="g-button"></div>
+    <p id="signin-msg" class="msg" role="alert"></p>
+  </div>
+</section>
+
+<section id="screen-setup" class="screen center" hidden>
+  <div class="signin-card">
+    <div class="wordmark">OFFSET <span class="media">MEDIA</span></div>
+    <h1>Setup needed</h1>
+    <p class="muted">Open <code>config.js</code> and fill in <code>clientId</code> and <code>apiUrl</code>, then reload.</p>
+  </div>
+</section>
+
+<section id="screen-loading" class="screen center">
+  <div class="spinner" aria-label="Loading"></div>
+</section>
+
+<div id="app" class="app" hidden>
+  <nav class="nav" aria-label="Main">
+    <div class="nav-brand wordmark">OFFSET <span class="media">MEDIA</span></div>
+    <button class="nav-item" data-view="dashboard"><span class="ico">&#9638;</span><span>Dashboard</span></button>
+    <button class="nav-item" data-view="projects"><span class="ico">&#9776;</span><span>Projects</span></button>
+    <button class="nav-item" data-view="more"><span class="ico">&#8943;</span><span>More</span></button>
+  </nav>
+  <main class="main">
+    <header class="topbar">
+      <div class="who" id="who"></div>
+      <button class="pill ghost" id="btn-refresh" type="button">Refresh</button>
+    </header>
+    <div id="view"></div>
+  </main>
+</div>
+
+<div id="toast" class="toast" role="status" hidden></div>
+
+<script src="config.js"></script>
+<script src="app.js"></script>
+<script src="https://accounts.google.com/gsi/client" async defer onload="window.OB && window.OB.gsiReady()"></script>
+</body>
+</html>
