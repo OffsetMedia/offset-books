@@ -1,7 +1,7 @@
 (function () {
   'use strict';
   var CFG = window.OB_CONFIG || {};
-  var state = { token: '', data: null, view: 'dashboard', gsiLoaded: false, started: false, tokenWaiters: [], refreshTimer: null };
+  var state = { token: '', data: null, view: 'dashboard', projectId: '', gsiLoaded: false, started: false, tokenWaiters: [], refreshTimer: null };
   var $ = function (id) { return document.getElementById(id); };
 
   /* ---------- helpers ---------- */
@@ -195,18 +195,87 @@
     var d = state.data, c = compute(d);
     var rows = Object.keys(c.byProject).map(function (k) { return c.byProject[k]; }).filter(function (x) { return x.p.business_line !== 'AI data'; })
       .sort(function (a, b) { return String(b.p.start || '').localeCompare(String(a.p.start || '')) || b.inv - a.inv; });
-    var h = '<h1 class="page-title">Projects</h1><p class="sub">Read-only for now. Adding and editing arrives in the next session.</p>';
+    var h = '<h1 class="page-title">Projects</h1><p class="sub">Tap a project to see its budget, costs, income and invoices.</p>';
     if (!rows.length) return h + '<div class="card empty">No projects yet.</div>';
     h += '<div class="card tablewrap"><table><thead><tr><th>Project</th><th>Client</th><th>Status</th><th class="num">Agreed</th><th class="num">Invoiced</th><th class="num">Costs</th><th class="num">Profit</th></tr></thead><tbody>';
     rows.forEach(function (x) {
       var pr = x.inv - x.cost;
-      h += '<tr><td><b>' + esc(x.p.name) + '</b></td><td>' + esc(x.p.client) + '</td><td>' + statusBadge(x.p.status) + '</td>' +
+      h += '<tr class="clickrow" data-project="' + esc(x.p.id) + '" tabindex="0"><td><b>' + esc(x.p.name) + '</b></td><td>' + esc(x.p.client) + '</td><td>' + statusBadge(x.p.status) + '</td>' +
         '<td class="num">' + (x.p.agreed_fee === '' || x.p.agreed_fee == null ? '<span class="muted">-</span>' : money(x.p.agreed_fee)) + '</td>' +
         '<td class="num">' + money(x.inv) + '</td><td class="num">' + money(x.cost) + '</td><td class="num ' + (pr < 0 ? 'over' : 'good') + '">' + money(pr) + '</td></tr>';
     });
     h += '</tbody></table></div>';
     var ai = c.ai;
     if (ai.income || ai.cost) h += '<div class="card" style="margin-top:14px"><div class="label">AI data (monthly totals only)</div><div class="big">' + lkr(ai.income - ai.cost) + '</div><div class="note">Income ' + lkr(ai.income) + ' · Costs ' + lkr(ai.cost) + '</div></div>';
+    return h;
+  }
+
+
+  var BUDGET_TYPES = [
+    ['Equipment rental', 'budget_equipment_rental'], ['Crew / freelancer', 'budget_crew'], ['Transport', 'budget_transport'],
+    ['Food', 'budget_food'], ['Location & venue', 'budget_location'], ['Other', 'budget_other']
+  ];
+
+  function viewProject() {
+    var d = state.data, p = (d.projects || []).filter(function (x) { return String(x.id) === String(state.projectId); })[0];
+    if (!p) { state.view = 'projects'; return viewProjects(); }
+    var entries = (d.entries || []).filter(function (e) { return String(e.project) === String(p.id) && String(e.account) !== '1400'; })
+      .sort(function (a, b) { return String(b.date).localeCompare(String(a.date)); });
+    var costs = entries.filter(function (e) { return e.kind === 'cost'; }), income = entries.filter(function (e) { return e.kind === 'income'; });
+    var totCost = 0, totInc = 0, byType = {};
+    costs.forEach(function (e) { var a = num(e.amount); totCost += a; byType[e.cost_type] = (byType[e.cost_type] || 0) + a; });
+    income.forEach(function (e) { totInc += num(e.amount); });
+    var invs = (d.invoices || []).filter(function (i) { return String(i.project) === String(p.id) || String(i.project) === String(p.name); });
+    var agreed = p.agreed_fee === '' || p.agreed_fee == null ? null : num(p.agreed_fee);
+    var profit = totInc - totCost;
+
+    var h = '<button class="pill ghost" id="btn-back" type="button">&larr; All projects</button>';
+    h += '<h1 class="page-title" style="margin-top:14px">' + esc(p.name) + '</h1>';
+    h += '<p class="sub">' + esc(p.client) + ' · ' + statusBadge(p.status) + (p.start ? ' · ' + esc(p.start) + (p.end ? ' to ' + esc(p.end) : '') : '') + (p.property ? ' · ' + esc(p.property) : '') + '</p>';
+
+    h += '<div class="grid kpis">';
+    h += kpi('Profit so far', lkr(profit), 'Income recorded less costs', 'profit');
+    h += kpi('Agreed fee', agreed == null ? '<span class="muted">-</span>' : lkr(agreed), agreed == null ? 'No fee set' : 'Recorded income ' + lkr(totInc) + (agreed ? ' (' + Math.round(totInc / agreed * 100) + '%)' : ''));
+    h += kpi('Costs', lkr(totCost), costs.length + ' line' + (costs.length === 1 ? '' : 's'));
+    h += '</div>';
+
+    // budget vs actual
+    var rows = '', budgetTotal = 0;
+    BUDGET_TYPES.forEach(function (t) {
+      var b = p[t[1]] === '' || p[t[1]] == null ? null : num(p[t[1]]), a = byType[t[0]] || 0;
+      if (b == null && !a) return;
+      if (b != null) budgetTotal += b;
+      var pct = b ? Math.min(100, a / b * 100) : 0, cls = b && a > b ? 'over' : (b && pct >= 75 ? 'warn' : '');
+      rows += '<tr><td>' + esc(t[0]) + '</td><td class="num">' + (b == null ? '<span class="muted">-</span>' : money(b)) + '</td><td class="num">' + money(a) + '</td>' +
+        '<td class="num ' + (b != null && a > b ? 'over' : '') + '">' + (b == null ? '<span class="muted">-</span>' : money(b - a)) + '</td>' +
+        '<td style="min-width:90px">' + (b ? '<div class="bar ' + cls + '" style="margin:0"><i style="width:' + pct.toFixed(0) + '%"></i></div>' : '') + '</td></tr>';
+    });
+    Object.keys(byType).forEach(function (k) {
+      if (!BUDGET_TYPES.some(function (t) { return t[0] === k; })) rows += '<tr><td>' + esc(k || 'Uncategorised') + '</td><td class="num"><span class="muted">-</span></td><td class="num">' + money(byType[k]) + '</td><td class="num"><span class="muted">-</span></td><td></td></tr>';
+    });
+    h += '<div class="card tablewrap" style="margin-top:14px"><h3>Budget vs actual</h3>' +
+      (rows ? '<table><thead><tr><th>Cost type</th><th class="num">Budget</th><th class="num">Actual</th><th class="num">Left</th><th></th></tr></thead><tbody>' + rows + '</tbody></table>' : '<div class="empty">No budget or costs yet.</div>') +
+      (p.budget_url ? '<p class="note"><a href="' + esc(p.budget_url) + '" target="_blank" rel="noopener">Open budget sheet</a></p>' : '') + '</div>';
+
+    function entryTable(list, empty) {
+      if (!list.length) return '<div class="empty">' + empty + '</div>';
+      return '<table><thead><tr><th>Date</th><th>Payee</th><th>Description</th><th>Type</th><th>Status</th><th class="num">Amount</th></tr></thead><tbody>' +
+        list.map(function (e) {
+          return '<tr><td>' + esc(e.date) + '</td><td>' + esc(e.payee) + '</td><td>' + esc(e.description) + '</td><td>' + esc(e.cost_type) + '</td><td>' +
+            '<span class="pillbadge ' + (e.paid_status === 'paid' ? 'good' : 'warn') + '">' + esc(e.paid_status || '') + '</span>' +
+            (e.doc_url ? ' <a href="' + esc(e.doc_url) + '" target="_blank" rel="noopener">doc</a>' : '') + '</td><td class="num">' + money(e.amount) + '</td></tr>';
+        }).join('') + '</tbody></table>';
+    }
+    h += '<div class="card tablewrap" style="margin-top:14px"><h3>Costs</h3>' + entryTable(costs, 'No costs recorded against this project.') + '</div>';
+    h += '<div class="card tablewrap" style="margin-top:14px"><h3>Income</h3>' + entryTable(income, 'No income recorded against this project.') + '</div>';
+
+    h += '<div class="card tablewrap" style="margin-top:14px"><h3>Invoices</h3>' + (invs.length ?
+      '<table><thead><tr><th>Number</th><th>Date</th><th>Due</th><th>Status</th><th class="num">Total</th><th class="num">Paid</th></tr></thead><tbody>' +
+      invs.map(function (i) {
+        return '<tr><td>' + (i.pdf_url ? '<a href="' + esc(i.pdf_url) + '" target="_blank" rel="noopener">' + esc(i.number) + '</a>' : esc(i.number)) + '</td><td>' + esc(i.date) + '</td><td>' + esc(i.due) + '</td><td>' + statusBadge(i.status) + '</td><td class="num">' + money(i.total) + '</td><td class="num">' + money(num(i.paid_amount) + num(i.advance_applied)) + '</td></tr>';
+      }).join('') + '</tbody></table>' : '<div class="empty">No invoices for this project.</div>') + '</div>';
+
+    if (p.notes) h += '<div class="card" style="margin-top:14px"><h3>Notes</h3><p class="muted" style="white-space:pre-wrap">' + esc(p.notes) + '</p></div>';
     return h;
   }
 
@@ -224,10 +293,11 @@
   function render() {
     var d = state.data; if (!d) return;
     $('who').innerHTML = '<b>' + esc(d.user.name || d.user.email) + '</b> · ' + esc(d.user.role);
-    document.querySelectorAll('.nav-item').forEach(function (b) { b.classList.toggle('active', b.getAttribute('data-view') === state.view); });
-    var v = state.view === 'projects' ? viewProjects() : (state.view === 'more' ? viewMore() : viewDashboard());
+    document.querySelectorAll('.nav-item').forEach(function (b) { b.classList.toggle('active', b.getAttribute('data-view') === (state.view === 'project' ? 'projects' : state.view)); });
+    var v = state.view === 'project' ? viewProject() : state.view === 'projects' ? viewProjects() : (state.view === 'more' ? viewMore() : viewDashboard());
     $('view').innerHTML = v;
     var so = $('btn-signout'); if (so) so.addEventListener('click', signOut);
+    var bk = $('btn-back'); if (bk) bk.addEventListener('click', function () { state.view = 'projects'; render(); });
     window.scrollTo(0, 0);
   }
 
@@ -248,7 +318,14 @@
 
   document.addEventListener('click', function (e) {
     var b = e.target.closest && e.target.closest('.nav-item');
-    if (b) { state.view = b.getAttribute('data-view'); render(); }
+    if (b) { state.view = b.getAttribute('data-view'); render(); return; }
+    var r = e.target.closest && e.target.closest('[data-project]');
+    if (r) { state.projectId = r.getAttribute('data-project'); state.view = 'project'; render(); }
+  });
+  document.addEventListener('keydown', function (e) {
+    if (e.key !== 'Enter') return;
+    var r = e.target.closest && e.target.closest('[data-project]');
+    if (r) { state.projectId = r.getAttribute('data-project'); state.view = 'project'; render(); }
   });
   $('btn-refresh').addEventListener('click', function () { loadBoot().then(function () { toast('Refreshed'); }); });
 
