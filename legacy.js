@@ -1313,10 +1313,11 @@ function vBank(){
     var t=stm.st;
     up='<div class="panel"><span class="h2big">Ready to import</span>'+
       '<div class="note"><b>'+esc(stm.st.fname)+'</b><br>'+t.rows.length+' lines from '+esc(t.from)+' to '+esc(t.to)+'. Opening balance LKR '+fmt2(t.meta.opening)+', closing LKR '+fmt2(t.meta.closing)+'.<br>Money in LKR '+fmt2(t.credits)+', money out LKR '+fmt2(t.debits)+'. Every line adds up to the running balance.</div>'+
+      OBX.bankFit(b,t.from,t.to)+
       '<div class="btnrow"><button class="btn primary" data-act="bk-import">Import and sort</button><button class="btn" data-act="bk-clear">Choose another file</button></div>'+
       '<div class="note">Lines already imported from an earlier statement are skipped. The PDF is filed in Drive under Bank statements.</div></div>';
   } else {
-    up='<div class="panel"><span class="h2big">Add a statement</span><div class="note">Download the HNB "Statement and Transaction Report" as a PDF and choose it here. It is read in your browser, checked against the running balance, then sorted.</div>'+
+    up='<div class="panel"><span class="h2big">Add a statement</span>'+OBX.bankCoverage(b)+'<div class="note">Download the HNB "Statement and Transaction Report" as a PDF and choose it here. It is read in your browser, checked against the running balance, then sorted.</div>'+
       '<input class="f" type="file" id="bk-file" accept="application/pdf">'+
       (nNew?'<div class="btnrow"><button class="btn" data-act="bk-sort-rest">Sort the '+nNew+' unsorted lines</button></div>':'')+'</div>';
   }

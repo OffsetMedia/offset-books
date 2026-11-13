@@ -416,6 +416,124 @@
     return h;
   };
 
+
+  /* ---------- issue cards: show the actual records, in plain words, with the fix next to them ---------- */
+  var PLAIN = [
+    [/^dup-/, function (x, r) { var e = r[0] && r[0].rec; return e && e.kind === 'income' ? 'The same income may be recorded twice' : 'The same payment may be recorded twice'; }],
+    [/^inc-noinv-/, 'Income is counted for an invoice that does not exist'],
+    [/^inc-client-/, 'This income line and its invoice name different clients'],
+    [/^inc-double-/, 'Income for one invoice is counted more than once'],
+    [/^inv-noinc-/, 'This invoice is not counted as income yet'],
+    [/^zero-/, 'This line has no amount'],
+    [/^assign-/, 'This supplier cost has no project'],
+    [/^unpaid-/, 'This cost is still marked unpaid']
+  ];
+  var FIXLABEL = { entry: 'Open this line', split: 'Assign or split', invoice: 'Open the invoice', project: 'Open the project', search: 'Show these lines', review: 'Review the bills', queue: 'Open approvals', bank: 'Open Bank', settings: 'Open Settings' };
+  function findInvoice(no) { return (DATA.invoices || []).filter(function (i) { return i.number === no; })[0]; }
+  function issueRefs(x) {
+    var refs = x.refs;
+    if (!refs) {
+      refs = []; var seen = {};
+      (String(x.key).match(/\bE\d{3,}\b/g) || []).concat(x.action && (x.action.type === 'entry' || x.action.type === 'split') ? [x.action.id] : []).forEach(function (id) { if (!seen[id]) { seen[id] = 1; refs.push({ type: 'entry', id: id }); } });
+      (String(x.key).match(/INV-\d+/g) || []).forEach(function (no) { if (!seen[no]) { seen[no] = 1; refs.push({ type: 'invoice', id: no }); } });
+    }
+    return refs.map(function (r) { return { type: r.type, id: r.id, rec: r.type === 'entry' ? findEntry(r.id) : r.type === 'invoice' ? findInvoice(r.id) : null }; });
+  }
+  /** An issue is done when the lines it was about are gone (for a duplicate: when either one is gone). */
+  function resolved(x) {
+    var ents = issueRefs(x).filter(function (r) { return r.type === 'entry'; });
+    if (!ents.length) return false;
+    var missing = ents.filter(function (r) { return !r.rec; }).length;
+    if (/^dup-/.test(x.key)) return missing > 0;
+    if (/^assign-/.test(x.key)) return missing > 0 || !!ents[0].rec.project || ents[0].rec.allocation === 'overhead';
+    if (/^zero-/.test(x.key)) return missing > 0 || n_(ents[0].rec.amount) !== 0;
+    if (/^unpaid-/.test(x.key)) return missing > 0 || ents[0].rec.paid_status === 'paid';
+    return missing === ents.length;
+  }
+  function nice(d) { d = String(d || '').slice(0, 10); if (!isDate(d)) return d || '-'; var p = d.split('-'); return Number(p[2]) + ' ' + ['Jan', 'Feb', 'Mar', 'Apr', 'May', 'Jun', 'Jul', 'Aug', 'Sep', 'Oct', 'Nov', 'Dec'][Number(p[1]) - 1] + ' ' + p[0]; }
+  /** Replaces record codes in a sentence with what they are, e.g. "E0155" becomes "Joshua trial quote (LKR 40,332)". */
+  function humanize(t) {
+    return e_(String(t || '')).replace(/\bE\d{3,}\b/g, function (id) { var e = findEntry(id); return e ? e_((e.payee || 'a line') + ' (LKR ' + m0(e.amount) + ')') : 'a deleted line'; });
+  }
+  function sourceOf(e) {
+    if (e.bill_id) return 'Split bill';
+    if (e.bank_line_id) return 'Bank statement';
+    var c = String(e.created_by || '');
+    if (c === 'import') return 'Imported from the old tracker';
+    if (/INV-\d+/.test(String(e.description || '')) && e.kind === 'income') return 'Made when the invoice was sent';
+    return c ? 'Typed in by ' + c.split('@')[0] : 'Typed in';
+  }
+  function entryFacts(e) {
+    var p = project(e.project);
+    return [['Date', nice(e.date)], ['Project', p ? p.name : (e.allocation === 'overhead' ? 'Company overhead' : 'None')], ['Shoot', e.shoot || '-'], ['Type', e.cost_type || '-'],
+      ['Paid', e.paid_status === 'paid' ? 'Paid' + (e.paid_date ? ' ' + nice(e.paid_date) : '') + (e.payment_method ? ', ' + e.payment_method : '') : 'Not paid yet'],
+      ['Came from', sourceOf(e)], ['Invoice no.', e.doc_number || '-']];
+  }
+  function entryCard(r, other, isDup) {
+    var e = r.rec;
+    if (!e) return '<div class="ic ic-gone"><b>Already deleted</b><span class="note">This line is no longer in the books.</span></div>';
+    var of = other && other.rec ? entryFacts(other.rec) : null;
+    var facts = entryFacts(e).map(function (f, i) { var diff = of && of[i][1] !== f[1]; return '<div class="ic-f' + (diff ? ' diff' : '') + '"><span>' + f[0] + '</span><b>' + e_(f[1]) + '</b></div>'; }).join('');
+    return '<div class="ic"><div class="ic-top"><b>' + e_(e.payee || 'No payee') + '</b><span class="ic-amt">LKR ' + m_(e.amount) + '</span></div>' +
+      '<div class="ic-desc">' + e_(e.description || 'No description') + (e.notes ? '<small>' + e_(e.notes) + '</small>' : '') + '</div><div class="ic-facts">' + facts + '</div>' +
+      '<div class="ic-foot"><span class="ic-id">' + (e.kind === 'income' ? 'Income' : 'Cost') + ' line ' + e_(e.id) + (e.doc_url ? ' · <a href="' + e_(e.doc_url) + '" target="_blank" rel="noopener">document</a>' : ' · no document') + '</span>' +
+      (admin() ? '<span class="btnrow"><button class="chip" data-obxfix="' + e_(JSON.stringify({ type: 'entry', id: e.id })) + '">Open</button>' + (isDup ? '<button class="chip ic-del" data-obxdel="' + e_(e.id) + '">Delete this one</button>' : '') + '</span>' : '') + '</div></div>';
+  }
+  function invoiceCard(r) {
+    var i = r.rec; if (!i) return '<div class="ic ic-gone"><b>' + e_(r.id) + '</b><span class="note">This invoice is not in the Invoices list.</span></div>';
+    return '<div class="ic"><div class="ic-top"><b>' + e_(i.client || 'No client') + '</b><span class="ic-amt">LKR ' + m_(n_(i.total) - n_(i.advance_applied)) + '</span></div><div class="ic-desc">Invoice ' + e_(i.number) + (i.subject ? ' · ' + e_(i.subject) : '') + '</div>' +
+      '<div class="ic-facts"><div class="ic-f"><span>Date</span><b>' + nice(i.date) + '</b></div><div class="ic-f"><span>Due</span><b>' + nice(i.due) + '</b></div><div class="ic-f"><span>Status</span><b>' + e_(i.status || '-') + '</b></div><div class="ic-f"><span>Project</span><b>' + e_((project(i.project) || {}).name || 'None') + '</b></div></div></div>';
+  }
+  function issueCard(x) {
+    var refs = issueRefs(x), isDup = /^dup-/.test(x.key), title = x.title, sv = SEV[x.severity] || SEV.low;
+    for (var k = 0; k < PLAIN.length; k++) if (PLAIN[k][0].test(x.key)) { title = typeof PLAIN[k][1] === 'function' ? PLAIN[k][1](x, refs) : PLAIN[k][1]; break; }
+    var ents = refs.filter(function (r) { return r.type === 'entry'; }), invs = refs.filter(function (r) { return r.type === 'invoice'; });
+    var cards = isDup && ents.length === 2 ? '<div class="ic-pair">' + entryCard(ents[0], ents[1], true) + '<div class="ic-vs">or</div>' + entryCard(ents[1], ents[0], true) + '</div>'
+      : (ents.length || invs.length ? '<div class="ic-list">' + ents.map(function (r) { return entryCard(r, null, false); }).join('') + invs.map(invoiceCard).join('') + '</div>' : '');
+    var why = isDup ? (x.why || 'Same payee and same amount, close together.') + ' The differences between the two are highlighted. Delete one if they are the same payment, or keep both if they are two real payments.' : x.detail;
+    var acts = [];
+    if (admin()) {
+      if (isDup) acts.push('<button class="btn obx-sm" data-obxdis="' + e_(x.key) + '">They are different: keep both</button>');
+      else {
+        if (/^assign-/.test(x.key) && ents[0] && ents[0].rec) acts.push('<button class="btn primary obx-sm" data-obxsplit="' + e_(ents[0].id) + '">Assign or split</button>', '<button class="btn obx-sm" data-obxover="' + e_(ents[0].id) + '">It\'s overhead</button>');
+        else if (x.action) acts.push('<button class="btn primary obx-sm" data-obxfix="' + e_(JSON.stringify(x.action)) + '">' + (FIXLABEL[x.action.type] || 'Fix') + '</button>');
+        if (/^inc-(noinv|client)-/.test(x.key) && ents[0] && ents[0].rec) acts.push('<button class="btn obx-sm ic-del" data-obxdel="' + e_(ents[0].id) + '">Delete this line</button>');
+        acts.push('<button class="btn obx-sm" data-obxdis="' + e_(x.key) + '">Ignore</button>');
+      }
+    }
+    return '<div class="obx-issue ic-issue"><div class="ic-head"><span class="ic-dot ' + sv[0] + '"></span><div><b>' + e_(title) + '</b><p class="note">' + humanize(why) + '</p></div></div>' + cards + '<div class="btnrow ic-acts">' + acts.join('') + '</div></div>';
+  }
+
+  /* ---------- bank: which dates are already covered ---------- */
+  function isoOf(v) { v = String(v || '').slice(0, 10); var m = /^(\d{2})\/(\d{2})\/(\d{4})$/.exec(v); return m ? m[3] + '-' + m[2] + '-' + m[1] : v; }
+  function addDay(d, n) { var t = new Date(d + 'T00:00:00'); t.setDate(t.getDate() + n); return t.getFullYear() + '-' + ('0' + (t.getMonth() + 1)).slice(-2) + '-' + ('0' + t.getDate()).slice(-2); }
+  function coverage(statements) {
+    var st = (statements || []).map(function (s) { return { from: isoOf(s.from), to: isoOf(s.to) }; }).filter(function (s) { return isDate(s.from) && isDate(s.to); }).sort(function (a, b) { return a.from.localeCompare(b.from); });
+    if (!st.length) return null;
+    var gaps = [], end = st[0].to;
+    st.slice(1).forEach(function (s) { if (s.from > addDay(end, 1)) gaps.push({ from: addDay(end, 1), to: addDay(s.from, -1) }); if (s.to > end) end = s.to; });
+    return { first: st[0].from, last: end, gaps: gaps };
+  }
+  /** Shown above the statement upload: the last date already in, and where to start the next download. */
+  OBX.bankCoverage = function (b) {
+    if (!b || !b.statements) return '';
+    var c = coverage(b.statements);
+    if (!c) return '<div class="bk-cover"><div><span class="mono">Nothing imported yet</span><b>Start with your first statement</b></div></div>';
+    var t = today(), upTo = c.last >= t;
+    return '<div class="bk-cover"><div><span class="mono">Last transaction date imported</span><b>' + nice(c.last) + '</b></div>' +
+      '<div><span class="mono">Next statement to upload</span><b>' + (upTo ? 'Up to date' : 'From ' + nice(c.last) + ' to today') + '</b></div></div>' +
+      '<p class="note bk-note">' + (upTo ? 'Statements cover every day up to today.' : 'Start the next download on ' + nice(c.last) + ', the same day the last one ended, so a payment made later that day is not missed. Lines already imported are skipped automatically.') + '</p>' +
+      (c.gaps.length ? '<div class="banner">Dates with no statement: ' + c.gaps.map(function (g) { return '<b>' + nice(g.from) + (g.to !== g.from ? ' to ' + nice(g.to) : '') + '</b>'; }).join(', ') + '. Download a statement for ' + (c.gaps.length === 1 ? 'that period' : 'those periods') + ' too.</div>' : '');
+  };
+  /** Shown on "Ready to import": does this file join up with what is already in? */
+  OBX.bankFit = function (b, from, to) {
+    var c = coverage((b || {}).statements); from = isoOf(from); to = isoOf(to);
+    if (!c || !isDate(from) || !isDate(to)) return '';
+    if (to <= c.last && from >= c.first && !c.gaps.length) return '<div class="banner">These dates (' + nice(from) + ' to ' + nice(to) + ') are already imported. Importing again is safe, but nothing new will be added.</div>';
+    if (from > addDay(c.last, 1)) return '<div class="banner">This statement starts on ' + nice(from) + ', but the last one ended on ' + nice(c.last) + '. <b>' + nice(addDay(c.last, 1)) + ' to ' + nice(addDay(from, -1)) + '</b> would be missing. Download one statement from ' + nice(c.last) + ' instead.</div>';
+    return '<div class="note" style="color:var(--good)">Joins up with the statements already imported (last date ' + nice(c.last) + ').</div>';
+  };
+
   var SEV = { high: ['late', 'Urgent'], medium: ['warn', 'Fix'], low: ['mute', 'Minor'] };
   OBX.vInbox = function () {
     var ms = inbox.messages;
@@ -429,13 +547,15 @@
       var hi = (m.issues || []).filter(function (x) { return x.severity === 'high'; }).length;
       return '<button class="obx-msg' + (m.id === sel.id ? ' on' : '') + (m.status === 'unread' ? ' unread' : '') + '" data-obxmsg="' + e_(m.id) + '"><span class="mono">' + e_(String(m.time).slice(0, 16)) + ' · ' + e_(m.trigger || '') + '</span><b>' + e_(m.title) + '</b>' + (hi ? '<span class="tag late">' + hi + ' urgent</span>' : '') + '</button>';
     }).join('') + '</div><div class="obx-read card"><span class="mono">' + e_(String(sel.time).slice(0, 16)) + '</span><h2 style="margin:6px 0 10px">' + e_(sel.title) + '</h2><p class="obx-body">' + e_(sel.body) + '</p>';
-    var is = sel.issues || [];
-    if (is.length) h += '<div class="obx-issues">' + is.map(function (x) {
-      var sv = SEV[x.severity] || SEV.low;
-      return '<div class="obx-issue"><div><span class="tag ' + sv[0] + '">' + sv[1] + '</span> <b>' + e_(x.title) + '</b><p class="note">' + e_(x.detail) + '</p></div><div class="btnrow">' +
-        (x.action ? '<button class="btn primary obx-sm" data-obxfix="' + e_(JSON.stringify(x.action)) + '">Fix</button>' : '') + '<button class="btn obx-sm" data-obxdis="' + e_(x.key) + '">Dismiss</button></div></div>';
-    }).join('') + '</div>';
-    else h += '<p class="note">Nothing to fix. 🎉</p>';
+    var all = sel.issues || [], is = all.filter(function (x) { return !resolved(x); }), fixedN = all.length - is.length;
+    if (fixedN) h += '<p class="note ic-fixed">' + fixedN + ' item' + (fixedN === 1 ? '' : 's') + ' from this check ' + (fixedN === 1 ? 'has' : 'have') + ' been fixed since.</p>';
+    if (is.length) {
+      var groups = [['high', 'Urgent'], ['medium', 'To fix'], ['low', 'Minor']];
+      h += '<div class="obx-issues">' + groups.map(function (g) {
+        var list = is.filter(function (x) { return (x.severity || 'low') === g[0]; });
+        return list.length ? '<div class="ic-group"><span class="tag ' + SEV[g[0]][0] + '">' + g[1] + '</span><span class="note">' + list.length + '</span></div>' + list.map(issueCard).join('') : '';
+      }).join('') + '</div>';
+    } else h += '<p class="note">Nothing to fix. 🎉</p>';
     return h + '</div></div>';
   };
 
@@ -668,7 +788,7 @@
     var menu = $('obx-menu');
     if (menu && !menu.hidden && !t.closest('.obx-addwrap')) menu.hidden = true;
     if (t.closest('#obx-modal [data-act]')) closeM();   // e.g. "+ Add cost to this shoot" opens the original cost form
-    var el = t.closest('[data-obx],[data-obxbill],[data-obxrev],[data-obxsplit],[data-obxover],[data-obxmsg],[data-obxfix],[data-obxdis]');
+    var el = t.closest('[data-obx],[data-obxbill],[data-obxrev],[data-obxsplit],[data-obxover],[data-obxmsg],[data-obxfix],[data-obxdis],[data-obxdel]');
     if (!el) { if (menu && t.closest('#obx-menu [data-act]')) menu.hidden = true; return; }
     ev.stopPropagation(); ev.preventDefault();
     var a = el.getAttribute('data-obx');
@@ -694,6 +814,14 @@
     }
     else if (el.hasAttribute('data-obxmsg')) { inbox.sel = el.getAttribute('data-obxmsg'); go('inbox'); }
     else if (el.hasAttribute('data-obxfix')) { try { fix(JSON.parse(el.getAttribute('data-obxfix'))); } catch (x) { /* ignore */ } }
+    else if (el.hasAttribute('data-obxdel')) {
+      var did = el.getAttribute('data-obxdel'), de = findEntry(did); if (!de) { go(state.view); return; }
+      if (el.getAttribute('data-armed') !== '1') { el.setAttribute('data-armed', '1'); el.textContent = 'Tap again to delete LKR ' + m0(de.amount); return; }
+      el.disabled = true; el.textContent = 'Deleting…';
+      api('obwDeleteEntry', [did, 'Deleted from the Inbox check']).then(function () {
+        DATA.entries = DATA.entries.filter(function (x) { return String(x.id) !== did; }); rerender(); say('Deleted ' + (de.payee || 'the line') + ', LKR ' + m0(de.amount) + '. It is kept in the audit log.', true);
+      }, function (e) { el.disabled = false; el.removeAttribute('data-armed'); el.textContent = 'Delete this one'; say(e.message); });
+    }
     else if (el.hasAttribute('data-obxdis')) {
       var key = el.getAttribute('data-obxdis');
       inbox.messages.forEach(function (m) { m.issues = (m.issues || []).filter(function (x) { return x.key !== key; }); }); go('inbox');

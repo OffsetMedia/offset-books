@@ -716,6 +716,7 @@ function obwDismissed_() {
   try { return JSON.parse(PropertiesService.getScriptProperties().getProperty('OBW_DISMISSED') || '{}'); } catch (x) { return {}; }
 }
 
+function obwNameKey_(v) { return String(v == null ? '' : v).toLowerCase().replace(/\(.*?\)/g, ' ').replace(/[^a-z0-9]+/g, ' ').trim(); }
 function obwNum_(v) { var n = Number(String(v == null ? '' : v).replace(/,/g, '')); return isFinite(n) ? n : 0; }
 function obwDays_(a, b) { return Math.round((new Date(b + 'T00:00:00') - new Date(a + 'T00:00:00')) / 86400000); }
 
@@ -759,13 +760,56 @@ function obwAuditIssues_() {
       add('assign-' + e.id, 'medium', e.payee + ' LKR ' + money(obwNum_(e.amount)) + ' has no project', e.date + ' · ' + e.cost_type + '. Assign it, split it across projects, or mark it as overhead.', { type: 'split', id: e.id });
   });
 
-  // 4. possible duplicate costs (same payee and amount within 3 days, not the same bill)
-  var costs = E.filter(function (e) { return e.kind === 'cost' && obwNum_(e.amount) > 500; }).sort(function (a, b) { return String(a.date).localeCompare(String(b.date)); });
-  for (var i = 0; i < costs.length; i++) for (var j = i + 1; j < costs.length; j++) {
-    var a = costs[i], b = costs[j]; if (obwDays_(a.date, b.date) > 3) break;
-    if (a.payee === b.payee && obwNum_(a.amount) === obwNum_(b.amount) && !(a.bill_id && a.bill_id === b.bill_id) && !/uber|pickme/i.test(a.payee))
-      add('dup-' + a.id + '-' + b.id, 'medium', 'Possible duplicate: ' + a.id + ' and ' + b.id, a.payee + ', LKR ' + money(obwNum_(a.amount)) + ' on ' + a.date + ' and ' + b.date + '.', { type: 'entry', id: b.id });
-  }
+  // 4. possible duplicates: the same payment or the same income recorded twice
+  (function () {
+    var alias = {};
+    String(st.payee_aliases || '').split(';').forEach(function (pair) {
+      var m = pair.split('='); if (m.length < 2) return;
+      var canon = obwNameKey_(m[0]);
+      m.slice(1).join('=').replace(/\(.*?\)/g, ' ').split(/[\/,]| and /).forEach(function (n) { var k = obwNameKey_(n); if (k) alias[k] = canon; });
+      alias[canon] = canon;
+    });
+    function who(e) { var k = obwNameKey_(e.payee); return alias[k] || k; }
+    function ride(e) { return /uber|pickme|pick me/i.test(String(e.payee) + ' ' + String(e.description)); }
+    function invNo(e) { var m = /INV-\d+/.exec(String(e.description || '') + ' ' + String(e.doc_number || '')); return m ? m[0] : ''; }
+    var L = E.filter(function (e) { return (e.kind === 'cost' || e.kind === 'income') && obwNum_(e.amount) >= 100 && /^\d{4}-\d{2}-\d{2}/.test(String(e.date)); })
+      .sort(function (x, y) { return String(x.date).localeCompare(String(y.date)); });
+    var bankNet = {}, bookedPerLine = {};
+    try { obwTable_('BankLines').rows.forEach(function (bl) { if (bl.id) bankNet[bl.id] = Math.abs(obwNum_(bl.net || bl.amount)); }); } catch (x) { /* optional */ }
+    L.forEach(function (e) { if (e.bank_line_id) bookedPerLine[e.bank_line_id] = (bookedPerLine[e.bank_line_id] || 0) + obwNum_(e.amount); });
+    var seen = {}, found = 0;
+    function pair(a, b, sev, why) {
+      var ids = [a.id, b.id].sort(), k = 'dup-' + ids[0] + '-' + ids[1];
+      if (seen[k] || found >= 40) return; seen[k] = 1; found++;
+      issues.push({ key: k, severity: sev, kind: 'duplicate', title: 'Possible duplicate: ' + a.payee + ', LKR ' + money(obwNum_(a.amount)),
+        detail: why, why: why, refs: [{ type: 'entry', id: a.id }, { type: 'entry', id: b.id }], action: { type: 'entry', id: b.id } });
+    }
+    for (var i = 0; i < L.length; i++) for (var j = i + 1; j < L.length; j++) {
+      var a = L[i], b = L[j], gap = obwDays_(String(a.date).slice(0, 10), String(b.date).slice(0, 10));
+      if (gap > 90) break;
+      if (a.kind !== b.kind || (a.bill_id && a.bill_id === b.bill_id)) continue;
+      var same = Math.abs(obwNum_(a.amount) - obwNum_(b.amount)) < 0.005;
+      if (a.bank_line_id && a.bank_line_id === b.bank_line_id) {
+        var bankAmt = bankNet[a.bank_line_id], booked = bookedPerLine[a.bank_line_id] || 0;
+        if (bankAmt ? booked > bankAmt + 1 : same) pair(a, b, 'high', 'Both lines come from the same bank transaction' + (bankAmt ? ' of LKR ' + money(bankAmt) + ', but together the books count LKR ' + money(booked) + ' for it.' : ', so it looks counted twice.'));
+        continue;
+      }
+      if (!same) continue;
+      var docA = String(a.doc_number || '').trim().toLowerCase(), docB = String(b.doc_number || '').trim().toLowerCase();
+      if (docA.length >= 3 && docA === docB && who(a) === who(b)) { pair(a, b, 'high', 'Same supplier, same invoice number and same amount.'); continue; }
+      if (a.kind === 'income') {
+        var ia = invNo(a), ib = invNo(b);
+        if (ia && ib && ia === ib) { pair(a, b, 'high', 'Both lines are income for ' + ia + '.'); continue; }
+        if ((ia ? 1 : 0) + (ib ? 1 : 0) === 1 && gap <= 90 && (who(a) === who(b) || (a.project && a.project === b.project))) { pair(a, b, 'medium', 'One line is the invoice (' + (ia || ib) + ') and the other looks like its payment recorded as new income. An invoice and its payment should be one income line.'); continue; }
+        continue;
+      }
+      if (ride(a) || ride(b)) continue;
+      if (gap <= 3 && who(a) && who(a) === who(b)) { pair(a, b, 'medium', 'Same payee and same amount, ' + (gap === 0 ? 'on the same day.' : gap + ' day' + (gap === 1 ? '' : 's') + ' apart.')); continue; }
+      var bankA = !!a.bank_line_id, bankB = !!b.bank_line_id;
+      if (gap <= 45 && obwNum_(a.amount) >= 5000 && bankA !== bankB && (who(a) === who(b) || (a.project && a.project === b.project && a.cost_type === b.cost_type))) {
+        pair(a, b, 'medium', 'One line came from the bank statement and the other was typed in or came from a bill, for the same amount. This is usually one payment recorded twice.'); continue; }
+    }
+  })();
 
   // 5. missing documents, grouped by payee (costs of 5,000+ older than 2 weeks)
   var miss = {};
