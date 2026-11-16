@@ -35,7 +35,10 @@ var OBW_ACTIONS = {
   obwDeleteShoot: obwDeleteShoot_,
   obwPlanShoots: obwPlanShoots_,
   obwShootsToBudget: obwShootsToBudget_,
-  obwPing: obwPing_
+  obwPing: obwPing_,
+  obwBankSuggest: obwBankSuggest_,
+  obwBankAsk: obwBankAsk_,
+  obwBankApply: obwBankApply_
 };
 
 // Fields the app may write. Anything else in a request is ignored.
@@ -747,7 +750,7 @@ function obwAuditIssues_() {
 
   // 1b. sent invoices with no income line (income would be understated)
   I.forEach(function (inv) {
-    if (!/^INV-/.test(inv.number) || inv.status === 'draft' || inv.status === 'void' || inv.status === 'cancelled') return;
+    if (!/^INV-/.test(inv.number) || inv.status === 'draft' || inv.status === 'void' || inv.status === 'cancelled' || obwLegacyInv_(inv)) return;
     if (!perInv[inv.number]) add('inv-noinc-' + inv.number, 'high', inv.number + ' (' + inv.client + ', LKR ' + money(obwNum_(inv.total)) + ') has no income line', 'The invoice exists but nothing in Entries counts it as income, so profit is understated. Add the income line (open the invoice and mark it sent, or add it in Entries).', { type: 'invoice', id: inv.number });
   });
 
@@ -824,7 +827,7 @@ function obwAuditIssues_() {
 
   // 6. overdue invoices
   I.forEach(function (inv) {
-    if (['sent', 'part paid', 'overdue'].indexOf(inv.status) === -1) return;
+    if (['sent', 'part paid', 'overdue'].indexOf(inv.status) === -1 || obwLegacyInv_(inv)) return;
     var bal = obwNum_(inv.total) - obwNum_(inv.advance_applied) - obwNum_(inv.paid_amount);
     if (bal > 1 && inv.due && inv.due < today) add('late-' + inv.number, obwDays_(inv.due, today) > 14 ? 'high' : 'medium', inv.number + ' is ' + obwDays_(inv.due, today) + (obwDays_(inv.due, today) === 1 ? ' day' : ' days') + ' overdue', inv.client + ' owes LKR ' + money(bal) + ' (due ' + inv.due + '). Send a reminder or record the payment.', { type: 'invoice', id: inv.number });
   });
@@ -884,6 +887,19 @@ function obwAuditIssues_() {
     var bills = A.filter(function (a) { return a.source === 'bill_upload'; }).length, other = A.length - bills;
     if (bills) add('rev-bills', 'medium', bills + ' bill' + (bills === 1 ? '' : 's') + ' read by Claude waiting for you', 'Review and approve them in Entries.', { type: 'review' });
     if (other) add('rev-queue', 'low', other + ' item' + (other === 1 ? '' : 's') + ' waiting in Approvals', 'From bank sorting or submissions.', { type: 'queue' });
+  } catch (x) { /* optional */ }
+
+  // 13. bank lines the matcher could not settle: money in with no invoice, or two records fitting equally
+  try {
+    var bm = obwBankCompute_().items, noMatchCosts = 0;
+    bm.forEach(function (b) {
+      var st = b.proposal.strength;
+      if (st === 'strong') return;
+      if (st === 'conflict') add('bankmatch-' + b.id, 'medium', 'Bank line needs a decision: ' + (b.payee || b.text.slice(0, 30)) + ', LKR ' + money(b.amount), b.proposal.why, { type: 'bank' });
+      else if (b.direction === 'credit' && b.proposal.mode === 'income') add('bankmatch-' + b.id, 'medium', 'Money in with no matching invoice: ' + (b.payee || b.text.slice(0, 30)) + ', LKR ' + money(b.amount), 'Received ' + b.date + '. ' + b.proposal.why, { type: 'bank' });
+      else if (b.direction === 'debit' && b.proposal.mode === 'new') noMatchCosts++;
+    });
+    if (noMatchCosts) add('bankmatch-costs', 'low', noMatchCosts + ' bank payment' + (noMatchCosts === 1 ? ' has' : 's have') + ' no cost in the books yet', 'Open Bank to check the suggested project and shoot for each, then approve to create the cost.', { type: 'bank' });
   } catch (x) { /* optional */ }
 
   var dis = obwDismissed_();
@@ -966,6 +982,11 @@ function obwInboxAction_(user, args) {
     var dis = obwDismissed_(); dis[key] = obwNow_();
     PropertiesService.getScriptProperties().setProperty('OBW_DISMISSED', JSON.stringify(dis));
     return { dismissed: key };
+  }
+  if (action === 'undismiss' && key) {
+    var dis2 = obwDismissed_(); delete dis2[key];
+    PropertiesService.getScriptProperties().setProperty('OBW_DISMISSED', JSON.stringify(dis2));
+    return { restored: key };
   }
   if (action === 'read') {
     var t = obwInboxTable_();
@@ -1133,4 +1154,359 @@ function obwPing_(user) {
     last = { time: v[0], user: v[1], tab: v[2], record: v[3], field: v[4], reason: v[7] };
   }
   return { rev: parts.join('.') + '|' + (last ? last.time + last.record + last.field : ''), last: last };
+}
+
+
+/* ================= bank matching: which invoice, bill or shoot does each bank line belong to? =================
+ * Reads the bank lines waiting in Approvals (made by the statement import) and suggests, for each one:
+ *   - the invoice it pays (credits), found from client, amount, invoice number and the invoice subject (e.g. "Next XV Match days"),
+ *   - a cost already in the books it settles (debits), or a whole split bill that adds up to it,
+ *   - otherwise a NEW entry, with a guessed client, project and shoot.
+ * Nothing is written until the admin approves a card. Rules run first; Claude is asked about the uncertain ones.
+ */
+
+var OBW_STOP = { the: 1, and: 1, for: 1, from: 1, inv: 1, invoice: 1, payment: 1, pay: 1, ceft: 1, fund: 1, transfer: 1, inward: 1, outward: 1, pvt: 1, ltd: 1, limited: 1,
+  part: 1, full: 1, balance: 1, advance: 1, bank: 1, ref: 1, lkr: 1, hnb: 1, online: 1, with: 1, shoot: 1, day: 1, days: 1, video: 1, photo: 1 };
+
+function obwToks_(s) {
+  var o = {};
+  String(s || '').toLowerCase().replace(/[^a-z0-9]+/g, ' ').split(' ').forEach(function (w) { if (w.length >= 3 && !OBW_STOP[w] && !/^\d+$/.test(w)) o[w] = 1; });
+  return o;
+}
+function obwShare_(a, b) { var w = []; for (var k in a) if (b[k]) w.push(k); return w; }
+
+/** "Aaron = Brijesh P J E; ..." becomes { name key: canonical key }. Same people only; "a different person" notes are in brackets and ignored. */
+function obwAliasMap_(settings) {
+  var map = {};
+  String((settings || {}).payee_aliases || '').split(';').forEach(function (part) {
+    var bits = part.split('='); if (bits.length < 2) return;
+    var canon = obwNameKey_(bits[0]); if (!canon) return;
+    map[canon] = canon; map[canon.replace(/ /g, '')] = canon;
+    var right = obwNameKey_(bits.slice(1).join('=')); if (right) { map[right] = canon; map[right.replace(/ /g, '')] = canon; }
+  });
+  return map;
+}
+function obwCanon_(name, alias) { var k = obwNameKey_(name); return alias[k] || alias[k.replace(/ /g, '')] || k; }
+/** 2 = same party, 1 = they share a distinctive word, 0 = no link. "Eventistry" and "Eventistry Sports Pvt Ltd" are only a 1. */
+function obwParty_(a, b, alias) {
+  var ka = obwCanon_(a, alias), kb = obwCanon_(b, alias);
+  if (!ka || !kb) return 0;
+  if (ka === kb) return 2;
+  return obwShare_(obwToks_(a), obwToks_(b)).length ? 1 : 0;
+}
+
+function obwInvDue_(i) { return Math.round((obwNum_(i.total) - obwNum_(i.advance_applied)) * 100) / 100; }
+function obwInvPaid_(i) { return i.status === 'paid' ? obwInvDue_(i) : obwNum_(i.paid_amount); }
+function obwInvBal_(i) { return Math.round((obwInvDue_(i) - obwInvPaid_(i)) * 100) / 100; }
+/** Old Zoho invoices added for the audit trail: before the app's books start, so never "owed" here. */
+function obwLegacyInv_(i) { return /imported from zoho/i.test(String(i.notes || '')) && /before the app/i.test(String(i.notes || '')); }
+
+function obwTryTable_(name) { try { return obwTable_(name).rows; } catch (x) { return []; } }
+
+function obwBankCompute_() {
+  var settings = obwSettings_(), alias = obwAliasMap_(settings);
+  var apps = obwTryTable_('Approvals').filter(function (a) {
+    return a.status === 'pending' && a.bank_line && a.source !== 'bill_upload' && ['cost', 'income', 'payment'].indexOf(a.kind) !== -1;
+  });
+  var out = { items: [], options: null };
+  var invoices = obwTryTable_('Invoices').filter(function (i) { return i.number && i.status !== 'draft' && i.status !== 'paid' && obwInvBal_(i) > 0.005; });
+  var entries = obwTryTable_('Entries').filter(function (e) { return e.id; });
+  var projects = obwTryTable_('Projects').filter(function (p) { return p.id; });
+  var shoots = obwTryTable_('Shoots').filter(function (s) { return s.id; });
+  var clients = obwTryTable_('Clients').filter(function (c) { return c.name; });
+  var pById = {}; projects.forEach(function (p) { pById[p.id] = p; });
+  var shootByInv = {}; shoots.forEach(function (s) { if (s.invoice_no) shootByInv[s.invoice_no] = s; });
+  out.options = {
+    clients: clients.map(function (c) { return c.name; }).sort(),
+    projects: projects.map(function (p) { return { id: p.id, name: p.name, client: p.client, status: p.status }; }),
+    shoots: shoots.map(function (s) { return { id: s.id, project: s.project, name: s.name, date: s.date }; })
+  };
+  var usedByOthers = {};      // entry ids already linked to a bank line
+  entries.forEach(function (e) { if (e.bank_line_id) usedByOthers[e.id] = e.bank_line_id; });
+  var groups = {};            // split bills: bill_id -> entries
+  entries.forEach(function (e) { if (e.kind === 'cost' && e.bill_id) (groups[e.bill_id] = groups[e.bill_id] || []).push(e); });
+
+  apps.forEach(function (a) {
+    var amt = Math.abs(obwNum_(a.amount)), date = String(a.date || '').slice(0, 10), text = String(a.suggestion || a.description || '');
+    var credit = a.kind !== 'cost', toks = obwToks_(text + ' ' + (a.payee || '') + ' ' + (a.description || ''));
+    var it = { id: a.id, bank_line: a.bank_line, date: date, amount: amt, direction: credit ? 'credit' : 'debit', text: text.slice(0, 160),
+      kind: a.kind, payee: a.payee || '', description: a.description || '', cost_type: a.cost_type || '', project: a.project || '', shoot: a.shoot || '',
+      client: '', reason: a.note || '', invoices: [], entries: [], proposal: null };
+
+    if (credit) {
+      invoices.forEach(function (i) {
+        var bal = obwInvBal_(i), due = obwInvDue_(i), sc = 0, why = [], conflict = '';
+        var num = String(i.number), digits = num.replace(/\D/g, '');
+        if (digits.length >= 6 && text.indexOf(digits) !== -1) { sc += 60; why.push('the invoice number is in the bank text'); }
+        if (Math.abs(bal - amt) < 0.5) { sc += 50; why.push('equals the balance'); }
+        else if (Math.abs(due - amt) < 0.5) { sc += 40; why.push('equals the invoice total'); }
+        else if (amt < bal) { sc += 8; why.push('a part payment'); }
+        else conflict = 'More than the balance of ' + obwMoney_(bal);
+        var pty = Math.max(obwParty_(a.payee, i.client, alias), obwParty_(text, i.client, alias) ? 1 : 0);
+        var clientWords = obwShare_(toks, obwToks_(i.client));
+        if (pty === 2) { sc += 30; why.push('same client'); } else if (clientWords.length) { sc += 18; why.push('client name in the bank text'); }
+        var subj = obwShare_(toks, obwToks_(i.subject)); if (subj.length) { sc += Math.min(24, subj.length * 12); why.push('subject mentions ' + subj.slice(0, 3).join(', ')); }
+        var pr = pById[i.project], pw = pr ? obwShare_(toks, obwToks_(pr.name)) : []; if (pw.length) { sc += 8; why.push('project name matches'); }
+        if (sc > 0 && !conflict) it.invoices.push({ number: i.number, client: i.client, subject: i.subject || '', project: i.project || '', balance: bal, total: due, date: i.date, due: i.due, score: sc, why: why.join(', '), legacy: obwLegacyInv_(i), shoot: (shootByInv[i.number] || {}).name || '' });
+        else if (sc >= 70 && conflict) it.conflict = conflict + ' on ' + i.number;
+      });
+      it.invoices.sort(function (x, y) { return y.score - x.score; }); it.invoices = it.invoices.slice(0, 3);
+    } else {
+      entries.forEach(function (e) {
+        if (e.kind !== 'cost' || usedByOthers[e.id] === a.bank_line) return;
+        var ea = obwNum_(e.amount); if (Math.abs(ea - amt) >= 0.5) return;
+        var sc = 50, why = ['same amount'];
+        var pty = obwParty_(a.payee, e.payee, alias) || (obwShare_(toks, obwToks_(e.payee)).length ? 1 : 0);
+        if (pty === 2) { sc += 30; why.push('same payee'); } else if (pty === 1) { sc += 14; why.push('similar payee'); }
+        var gap = e.date && date ? obwDays_(String(e.date).slice(0, 10), date) : 0;
+        if (gap >= -3 && gap <= 90) { sc += 10; why.push(gap < 0 ? 'dated just after the payment' : 'entered ' + gap + ' days before'); }
+        var already = e.paid_status === 'paid';
+        if (already) why.push('already marked paid');
+        if (usedByOthers[e.id]) { sc -= 80; why.push('linked to another bank line'); }
+        if (sc >= 50) it.entries.push({ type: 'entry', ids: [e.id], id: e.id, date: String(e.date).slice(0, 10), payee: e.payee, amount: ea, project: e.project || '', shoot: e.shoot || '',
+          description: e.description || '', paid: already, score: sc, why: why.join(', '), blocked: !!usedByOthers[e.id] });
+      });
+      Object.keys(groups).forEach(function (bid) {
+        var g = groups[bid], sum = Math.round(g.reduce(function (t, e) { return t + obwNum_(e.amount); }, 0) * 100) / 100;
+        if (g.length < 2 || Math.abs(sum - amt) >= 0.5 || g.some(function (e) { return usedByOthers[e.id]; })) return;
+        var pty = obwParty_(a.payee, g[0].payee, alias) || (obwShare_(toks, obwToks_(g[0].payee)).length ? 1 : 0), sc = 50 + (pty === 2 ? 30 : pty === 1 ? 14 : 0);
+        it.entries.push({ type: 'group', ids: g.map(function (e) { return e.id; }), id: bid, date: String(g[0].date).slice(0, 10), payee: g[0].payee, amount: sum,
+          project: g.map(function (e) { return e.project; }).filter(function (v, i, arr) { return v && arr.indexOf(v) === i; }).join(', '), shoot: '', description: 'Split bill over ' + g.length + ' lines',
+          paid: g.every(function (e) { return e.paid_status === 'paid'; }), score: sc, why: 'a split bill whose lines add up to this payment' + (pty === 2 ? ', same payee' : ''), blocked: false });
+      });
+      it.entries.sort(function (x, y) { return y.score - x.score; }); it.entries = it.entries.slice(0, 3);
+    }
+
+    // proposal
+    var cands = credit ? it.invoices : it.entries, best = cands[0], second = cands[1];
+    var strong = best && best.score >= 80 && !best.blocked && (!second || best.score - second.score >= 15);
+    var p = { mode: '', ref: '', client: '', project: a.project || '', shoot: a.shoot || '', payee: a.payee || '', cost_type: a.cost_type || '', description: a.description || '', why: '', strength: 'none', source: 'rules' };
+    if (best && (strong || best.score >= 60)) {
+      p.strength = strong ? 'strong' : 'maybe';
+      if (credit) {
+        p.mode = 'invoice'; p.ref = best.number; p.client = best.client; p.project = best.project || p.project; p.shoot = best.shoot || p.shoot; p.payee = best.client;
+        p.why = 'Matches ' + best.number + (best.subject ? ' "' + best.subject + '"' : '') + ': ' + best.why + '.';
+      } else {
+        p.mode = best.type; p.ref = best.ids.join(','); p.project = best.project && best.type === 'entry' ? best.project : p.project; p.shoot = best.shoot || p.shoot; p.payee = best.payee;
+        p.why = (best.paid ? 'Already in your books as ' : 'Looks like ') + (best.type === 'group' ? 'split bill ' + best.id : best.id) + ' (' + best.payee + ', LKR ' + obwMoney_(best.amount) + '): ' + best.why + '.';
+      }
+    } else {
+      p.mode = credit ? 'income' : 'new'; p.why = (credit ? 'No open invoice fits this amount and client, so this would be a new income line.' : 'Nothing in your books fits, so this would be a new cost line.');
+    }
+    // client / project / shoot guesses for new lines
+    if (p.mode === 'new' || p.mode === 'income') {
+      if (!p.project) {
+        var byShoot = shoots.filter(function (s) { return s.date && date && Math.abs(obwDays_(String(s.date).slice(0, 10), date)) <= 2; });
+        var projs = {}; byShoot.forEach(function (s) { projs[s.project] = 1; });
+        if (Object.keys(projs).length === 1) { p.project = Object.keys(projs)[0]; p.why += ' A shoot was on or near ' + date + '.'; }
+      }
+      var pr0 = pById[p.project];
+      if (!p.project && credit) {
+        var cm = clients.filter(function (c) { return obwParty_(p.payee, c.name, alias) === 2 || obwShare_(toks, obwToks_(c.name)).length; });
+        if (cm.length === 1) { p.client = cm[0].name; var open = projects.filter(function (x) { return x.client === p.client && ['Closed', 'Cancelled'].indexOf(x.status) === -1; }); if (open.length === 1) p.project = open[0].id; }
+      }
+      if (pr0 || p.project) { pr0 = pById[p.project]; if (pr0 && !p.client) p.client = pr0.client || ''; }
+      if (p.project && !p.shoot) {
+        var ps = shoots.filter(function (s) { return s.project === p.project; });
+        var sm = ps.filter(function (s) { return obwShare_(toks, obwToks_(s.name)).length || (s.date && date && Math.abs(obwDays_(String(s.date).slice(0, 10), date)) <= 2); });
+        if (sm.length === 1) p.shoot = sm[0].name;
+      }
+      if (credit && !p.payee && p.client) p.payee = p.client;
+    }
+    if (it.conflict && p.strength !== 'strong') { p.strength = 'conflict'; p.why += ' ' + it.conflict + '.'; }
+    if (cands.length > 1 && !strong && cands[0].score >= 60 && cands[1].score >= 60) { p.strength = 'conflict'; p.why += ' Two records fit about equally well.'; }
+    it.proposal = p;
+    out.items.push(it);
+  });
+  return out;
+}
+function obwMoney_(n) { return (Math.round(Number(n) * 100) / 100).toFixed(2).replace(/\B(?=(\d{3})+(?!\d))/g, ','); }
+
+/** What the Banking page shows. Claude's earlier answers (kept 6 hours) are layered on top of the rule-based suggestions. */
+function obwBankSuggest_(user) {
+  obwRequireAdmin_(user);
+  var r = obwBankCompute_(), cache = CacheService.getScriptCache();
+  r.items.forEach(function (it) {
+    var raw = null; try { raw = cache.get('obwbk-' + it.id + '-' + it.amount); } catch (x) { /* no cache */ }
+    if (!raw) return;
+    var c; try { c = JSON.parse(raw); } catch (x) { return; }
+    if (c && c.proposal) { it.proposal = c.proposal; it.claude = true; }
+  });
+  return r;
+}
+
+function obwParseArr_(text) {
+  var a = text.indexOf('['), b = text.lastIndexOf(']');
+  if (a === -1 || b <= a) return [];
+  try { return JSON.parse(text.slice(a, b + 1)); } catch (x) { return []; }
+}
+
+/**
+ * Asks Claude to judge the lines the rules could not settle. args = [ [approvalIds] ] (up to 12).
+ * Claude gets the open invoices (with subjects), unpaid costs, projects, shoots, clients and the calendar for context.
+ * It can only choose records that exist; every answer is a suggestion the admin still approves.
+ */
+function obwBankAsk_(user, args) {
+  obwRequireAdmin_(user);
+  var settings = obwSettings_(), budget = Number(settings.claude_monthly_budget_usd) || 4;
+  if (obwMonthSpend_() >= budget) throw obwErr_('This month\'s Claude budget (USD ' + budget + ') is used up. Raise claude_monthly_budget_usd in Settings.');
+  var want = {}; (args[0] || []).slice(0, 12).forEach(function (id) { want[String(id)] = 1; });
+  var comp = obwBankCompute_(), items = comp.items.filter(function (i) { return want[i.id]; });
+  if (!items.length) return { asked: 0, results: {} };
+  var invoices = obwTryTable_('Invoices').filter(function (i) { return i.number && i.status !== 'draft' && i.status !== 'paid' && obwInvBal_(i) > 0.005; });
+  var entries = obwTryTable_('Entries').filter(function (e) { return e.kind === 'cost' && !e.bank_line_id && e.id; }).slice(-160);
+  var shoots = comp.options.shoots, projects = comp.options.projects.filter(function (p) { return ['Closed', 'Cancelled'].indexOf(p.status) === -1; });
+  var snap = {
+    today: Utilities.formatDate(new Date(), 'Asia/Colombo', 'yyyy-MM-dd'),
+    open_invoices: invoices.slice(0, 80).map(function (i) { return { number: i.number, client: i.client, subject: i.subject || '', project: i.project || '', balance: obwInvBal_(i), date: i.date }; }),
+    costs_without_bank_line: entries.map(function (e) { return { id: e.id, date: String(e.date).slice(0, 10), payee: e.payee, amount: obwNum_(e.amount), project: e.project || '', shoot: e.shoot || '', paid: e.paid_status === 'paid', description: String(e.description || '').slice(0, 60), bill_id: e.bill_id || '' }; }),
+    projects: projects, shoots: shoots, clients: comp.options.clients,
+    calendar: obwCalendarLines_(settings).slice(-80),
+    payee_aliases: String(settings.payee_aliases || ''),
+    lines: items.map(function (i) { return { id: i.id, date: i.date, direction: i.direction, amount: i.amount, bank_text: i.text, rule_guess: { mode: i.proposal.mode, ref: i.proposal.ref, project: i.proposal.project, shoot: i.proposal.shoot } }; })
+  };
+  var system = [
+    'You match bank statement lines to records in the books of OFFSET MEDIA (PVT) LTD, a video and photo production company in Colombo. Amounts are LKR.',
+    'For each line return one object in a JSON array, and nothing else: {"id":"","action":"invoice"|"entry"|"group"|"new"|"unsure","invoice":"","entry_ids":[],"client":"","project":"","shoot":"","payee":"","cost_type":"","description":"","confidence":"high"|"medium"|"low","reason":""}',
+    '- A credit that pays a client invoice: action "invoice", with the invoice number from open_invoices. Use the invoice subject, client and balance. Subjects usually name the shoot (e.g. "Next XV Match days"). A part payment is allowed when the amount is below the balance.',
+    '- A debit that settles a cost already in costs_without_bank_line: action "entry" with that id, or "group" with all ids of one bill_id whose amounts add up to the debit. Match payee (use the aliases), amount, and dates.',
+    '- If nothing existing fits: action "new" with your best client, project (a project id from the list), shoot (a shoot name from the list for that project, or empty), payee, cost_type and a description of 8 words or fewer.',
+    '- If it is unclear or two records fit equally well: action "unsure" and say why in reason.',
+    '- Use ONLY invoice numbers, entry ids, project ids, shoot names and client names that appear in the data. Never invent any. Eventistry and Eventistry Sports Pvt Ltd are different clients.',
+    '- Everything you return is a suggestion; a person approves it. Be honest about confidence.'
+  ].join('\n');
+  var fast = settings.claude_model_fast || 'claude-haiku-5-5', strong = settings.claude_model_strong || 'claude-sonnet-5-5';
+  var map = {};
+  function ask(model, subset, hint) {
+    var payload = JSON.stringify(Object.assign({}, snap, { lines: snap.lines.filter(function (l) { return subset.indexOf(l.id) !== -1; }) }));
+    obwParseArr_(obwCallClaude_(model, system, (hint ? hint + '\n\n' : '') + payload, 'bank matching')).forEach(function (o) { if (o && o.id) map[String(o.id)] = o; });
+  }
+  var ids = items.map(function (i) { return i.id; });
+  ask(fast, ids, '');
+  var unsure = ids.filter(function (id) { var o = map[id]; return !o || o.confidence === 'low' || o.action === 'unsure'; });
+  if (unsure.length && obwMonthSpend_() < budget) { try { ask(strong, unsure, 'A faster model was unsure about these lines. Think carefully and give your best answer for each.'); } catch (x) { /* keep the first answers */ } }
+
+  var invSet = {}; invoices.forEach(function (i) { invSet[i.number] = i; });
+  var entSet = {}; entries.forEach(function (e) { entSet[e.id] = e; });
+  var pSet = {}; projects.forEach(function (p) { pSet[p.id] = p; });
+  var cSet = {}; comp.options.clients.forEach(function (c) { cSet[c] = 1; });
+  var cache = CacheService.getScriptCache(), results = {};
+  items.forEach(function (it) {
+    var o = map[it.id]; if (!o) return;
+    var base = Object.assign({}, it.proposal), p = base, conf = (o.confidence === 'high' || o.confidence === 'medium') ? o.confidence : 'low';
+    p.source = 'claude'; p.why = String(o.reason || '').slice(0, 200) || p.why;
+    var pid = String(o.project || ''); if (pSet[pid]) p.project = pid;
+    var sn = String(o.shoot || ''); if (sn && shoots.some(function (s) { return s.name === sn && (!p.project || s.project === p.project); })) p.shoot = sn;
+    var cl = String(o.client || ''); if (cSet[cl]) p.client = cl;
+    if (o.payee) p.payee = String(o.payee).slice(0, 80);
+    if (o.cost_type) p.cost_type = String(o.cost_type).slice(0, 40);
+    if (o.description) p.description = String(o.description).slice(0, 120);
+    var ok = false;
+    if (o.action === 'invoice' && it.direction === 'credit' && invSet[o.invoice] && it.amount <= obwInvBal_(invSet[o.invoice]) + 0.005) {
+      p.mode = 'invoice'; p.ref = String(o.invoice); p.client = invSet[o.invoice].client; p.project = invSet[o.invoice].project || p.project; p.payee = invSet[o.invoice].client; ok = true;
+      var sh = shoots.filter(function (s) { return s.project === p.project && obwShootInv_(s) === p.ref; })[0]; if (sh) p.shoot = sh.name;
+    } else if ((o.action === 'entry' || o.action === 'group') && it.direction === 'debit' && (o.entry_ids || []).length && (o.entry_ids || []).every(function (id) { return entSet[id]; })) {
+      var sum = o.entry_ids.reduce(function (t, id) { return t + obwNum_(entSet[id].amount); }, 0);
+      if (Math.abs(sum - it.amount) < 0.5) { p.mode = o.entry_ids.length > 1 ? 'group' : 'entry'; p.ref = o.entry_ids.join(','); p.payee = entSet[o.entry_ids[0]].payee; ok = true; }
+    } else if (o.action === 'new') { p.mode = it.direction === 'credit' ? 'income' : 'new'; ok = true; }
+    p.strength = ok && (o.action === 'new' || conf !== 'low') ? (conf === 'high' && o.action !== 'new' ? 'strong' : 'maybe') : 'unsure';
+    if (!ok && o.action !== 'unsure') p.why = ('Claude could not confirm a match. ' + p.why).slice(0, 200);
+    if (o.action === 'unsure') p.strength = 'unsure';
+    p.confidence = conf;
+    results[it.id] = p;
+    try { cache.put('obwbk-' + it.id + '-' + it.amount, JSON.stringify({ proposal: p }), 21600); } catch (x) { /* ignore */ }
+  });
+  return { asked: items.length, results: results, spend: obwMonthSpend_() };
+}
+function obwShootInv_(s) { return String(s.invoice_no || ''); }
+
+/**
+ * Applies one decision. args = [approvalId, choice]
+ *   choice.mode: 'invoice' (ref = invoice number) | 'entry' / 'group' (ref = entry ids) | 'new' / 'income' (fields below)
+ *   new/income fields: project, shoot, client, payee, cost_type, description
+ */
+function obwBankApply_(user, args) {
+  obwRequireAdmin_(user);
+  var id = String(args[0] || ''), c = args[1] || {}, mode = String(c.mode || '');
+  var t = obwTable_('Approvals'), a = t.rows.filter(function (r) { return String(r.id) === id; })[0];
+  if (!a) throw obwErr_('That bank line was not found. Refresh and try again.');
+  if (a.status !== 'pending') throw obwErr_('This bank line was already ' + a.status + '.');
+  if (!a.bank_line) throw obwErr_('This item is not a bank line.');
+  var amt = Math.abs(obwNum_(a.amount)), date = String(a.date || '').slice(0, 10), method = a.payment_method || 'Bank transfer';
+  obwAssertOpen_(date);
+  var result = {}, ref = '';
+
+  if (mode === 'invoice') {
+    var inv = obwTryTable_('Invoices').filter(function (i) { return String(i.number) === String(c.ref); })[0];
+    if (!inv) throw obwErr_('Invoice ' + c.ref + ' was not found.');
+    if (inv.status === 'draft') throw obwErr_(inv.number + ' is still a draft. Send it before recording a payment.');
+    if (inv.status === 'paid') throw obwErr_(inv.number + ' is already paid.');
+    if (amt > obwInvBal_(inv) + 0.005) throw obwErr_('That is more than the balance of ' + inv.number + ' (LKR ' + obwMoney_(obwInvBal_(inv)) + ').');
+    if (typeof recordPayment !== 'function') throw obwErr_('The invoice payment code (Code.gs) was not found in this project.');
+    result.payment = obwAsUser_(user, function () { return recordPayment(inv.number, { amount: amt, date: date, method: method }); });
+    ref = inv.number;
+  } else if (mode === 'entry' || mode === 'group') {
+    var ids = String(c.ref || '').split(',').map(function (s) { return s.trim(); }).filter(String);
+    if (!ids.length) throw obwErr_('Choose which cost this payment settles.');
+    var lock = obwLock_();
+    try {
+      var et = obwTable_('Entries'); obwEnsureCols_(et, OBW_EXTRA_ENTRY_COLS);
+      var rows = ids.map(function (eid) { var r = et.rows.filter(function (x) { return String(x.id) === eid; })[0]; if (!r) throw obwErr_('Entry ' + eid + ' no longer exists.'); return r; });
+      var sum = rows.reduce(function (s, r) { return s + obwNum_(r.amount); }, 0);
+      rows.forEach(function (r) {
+        if (r.kind !== 'cost') throw obwErr_(r.id + ' is not a cost.');
+        if (r.bank_line_id && String(r.bank_line_id) !== String(a.bank_line)) throw obwErr_(r.id + ' is already linked to another bank line (' + r.bank_line_id + ').');
+        obwAssertOpen_(r.date);
+      });
+      var remaining = amt;
+      rows.forEach(function (r) {
+        var ea = obwNum_(r.amount), isLast = rows.length === 1, patch = {};
+        var pay = rows.length > 1 ? ea : Math.min(remaining, ea);
+        var newPaid = rows.length > 1 ? ea : Math.min(ea, (r.paid_status === 'paid' ? 0 : obwNum_(r.paid_amount)) + pay);
+        if (r.paid_status === 'paid' && rows.length === 1) newPaid = ea;
+        var full = newPaid >= ea - 0.5;
+        patch.paid_status = full ? 'paid' : 'part'; patch.paid_amount = Math.round(newPaid * 100) / 100; patch.paid_date = full ? date : (r.paid_date || '');
+        if (!r.payment_method) patch.payment_method = method;
+        patch.bank_line_id = a.bank_line;
+        var fields = Object.keys(patch); obwWriteCells_(et, r._row, patch, fields);
+        fields.forEach(function (f) { if (String(r[f] == null ? '' : r[f]) !== String(patch[f])) obwAudit_(user, 'Entries', r.id, f, r[f], patch[f], 'Matched to bank line ' + a.bank_line); });
+      });
+      result.entries = ids;
+    } finally { lock.releaseLock(); }
+    ref = ids.join(',');
+  } else if (mode === 'new' || mode === 'income') {
+    var credit = a.kind !== 'cost';
+    var payee = String(c.payee || (credit ? c.client : '') || a.payee || '').trim();
+    if (!payee) throw obwErr_('Enter who ' + (credit ? 'paid' : 'was paid') + '.');
+    var project = String(c.project || ''); if (project && !obwTryTable_('Projects').some(function (p) { return p.id === project; })) throw obwErr_('Project ' + project + ' was not found.');
+    var entry = { date: date, kind: credit ? 'income' : 'cost', amount: amt, project: project, shoot: String(c.shoot || ''), payee: payee, cost_type: credit ? '' : String(c.cost_type || a.cost_type || 'Other'),
+      description: String(c.description || a.description || a.suggestion || '').slice(0, 160), business_line: a.business_line || 'Production', payment_method: method,
+      paid_status: 'paid', paid_date: date, paid_amount: amt, doc_status: a.doc_status || (credit ? '' : 'bank line only'), bank_line_id: a.bank_line, auto_account: !a.account, account: a.account || '' };
+    result.entry = obwSaveEntry_(user, [entry, 'Created from bank line ' + a.bank_line + ' (' + id + ')']);
+    ref = result.entry.id;
+  } else throw obwErr_('Unknown choice.');
+
+  var lock2 = obwLock_();
+  try {
+    t = obwTable_('Approvals');
+    var cur = t.rows.filter(function (r) { return String(r.id) === id; })[0];
+    if (cur && cur.status === 'pending') {
+      var patchA = { status: 'approved', decided_by: user.email, decided_at: obwNow_(), entry_id: ref };
+      if (mode === 'invoice') { patchA.kind = 'payment'; patchA.doc_number = ref; }
+      if (c.project != null && t.headers.indexOf('project') !== -1 && mode !== 'invoice') patchA.project = String(c.project || '');
+      obwWriteCells_(t, cur._row, patchA, Object.keys(patchA));
+      obwAudit_(user, 'Approvals', id, 'status', 'pending', 'approved', 'Bank match: ' + mode + ' ' + ref);
+    }
+    var bt = obwTryTableObj_('BankLines');
+    if (bt) { var bl = bt.rows.filter(function (r) { return String(r.id) === String(a.bank_line); })[0]; if (bl) { obwWriteCells_(bt, bl._row, { status: 'posted', matched_entry: ref }, ['status', 'matched_entry']); obwAudit_(user, 'BankLines', a.bank_line, 'status', bl.status, 'posted', 'Bank match: ' + ref); } }
+  } finally { lock2.releaseLock(); }
+  return { id: id, mode: mode, ref: ref, result: result };
+}
+function obwTryTableObj_(name) { try { return obwTable_(name); } catch (x) { return null; } }
+
+/** Code.gs functions read the signed-in user from API_EMAIL_ (set by Api.gs). Set it for the one call, then put it back. */
+function obwAsUser_(user, fn) {
+  var had = typeof API_EMAIL_ !== 'undefined', old;
+  if (had) { old = API_EMAIL_; API_EMAIL_ = user.email; }
+  try { return fn(); } finally { if (had) API_EMAIL_ = old; }
 }

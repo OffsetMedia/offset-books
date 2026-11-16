@@ -124,6 +124,7 @@
   /** Runs after every page draws: tags list cells so phones can show tables as clean rows. */
   OBX.afterGo = function (v) {
     document.body.setAttribute('data-obview', v);
+    if (v === 'inbox' && inbox.restore) { var rs = inbox.restore; inbox.restore = null; if (Date.now() - rs.t < 600000) setTimeout(function () { window.scrollTo(0, rs.y); }, 0); }
     updateAppBar(v);
     Array.prototype.forEach.call(document.querySelectorAll('#main .tablewrap table'), function (t) {
       if (t.classList.contains('kv')) return;
@@ -388,7 +389,7 @@
   OBX.unread = function () { return inbox.messages.filter(function (m) { return m.status === 'unread'; }).length; };
   function loadInbox(then) {
     if (!admin()) return;
-    api('obwInbox', []).then(function (r) { inbox.messages = r.messages || []; inbox.weekly = r.weekly; inbox.loaded = true; renderNav(); if (state.view === 'inbox' || state.view === 'dashboard') go(state.view); if (then) then(); },
+    api('obwInbox', []).then(function (r) { inbox.messages = r.messages || []; inbox.weekly = r.weekly; inbox.loaded = true; renderNav(); if (state.view === 'inbox' || state.view === 'dashboard') keepScroll(function () { go(state.view); }); if (then) then(); },
       function () { inbox.loaded = true; });
   }
   OBX.start = function () {
@@ -403,7 +404,7 @@
     say('Claude is checking the books…', true);
     api('obwRunAudit', [trigger]).then(function (r) {
       inbox.messages.unshift(r.message); inbox.weekly = r.weekly; inbox.sel = r.message.id; inbox.loaded = true;
-      renderNav(); if (state.view === 'inbox' || state.view === 'dashboard') go(state.view);
+      renderNav(); if (state.view === 'inbox' || state.view === 'dashboard') keepScroll(function () { go(state.view); });
       say('Check done: ' + r.message.title.replace(/^Weekly check: /, ''), true);
     }, function (e) { if (btn) { btn.disabled = false; btn.textContent = 'Run check now'; } say(e.message); });
   }
@@ -501,7 +502,7 @@
         acts.push('<button class="btn obx-sm" data-obxdis="' + e_(x.key) + '">Ignore</button>');
       }
     }
-    return '<div class="obx-issue ic-issue"><div class="ic-head"><span class="ic-dot ' + sv[0] + '"></span><div><b>' + e_(title) + '</b><p class="note">' + humanize(why) + '</p></div></div>' + cards + '<div class="btnrow ic-acts">' + acts.join('') + '</div></div>';
+    return '<div class="obx-issue ic-issue" data-ikey="' + e_(x.key) + '"><div class="ic-head"><span class="ic-dot ' + sv[0] + '"></span><div><b>' + e_(title) + '</b><p class="note">' + humanize(why) + '</p></div></div>' + cards + '<div class="btnrow ic-acts">' + acts.join('') + '</div></div>';
   }
 
   /* ---------- bank: which dates are already covered ---------- */
@@ -561,6 +562,7 @@
 
   function fix(a) {
     if (!a) return;
+    if (state.view === 'inbox') inbox.restore = { y: window.scrollY, t: Date.now() };
     if (a.type === 'entry') { var e = findEntry(a.id); if (!e) { say(a.id + ' is no longer in the books.', true); return; } state.etab = 'entries'; go('entries'); openEntry(a.id); }
     else if (a.type === 'split') { var s = findEntry(a.id); if (s) OBX.openBillFor(s); else say(a.id + ' is no longer in the books.', true); }
     else if (a.type === 'invoice') openDoc('invoice', a.id);
@@ -782,13 +784,243 @@
     tick(true);
   }
 
+  /* ---------- bank matching: approve what each bank line is ---------- */
+  var bm = { items: [], options: { clients: [], projects: [], shoots: [] }, loaded: false, loading: false, at: 0, err: '', asking: 0, askErr: '', asked: {}, sel: {}, edit: {}, open: {}, busy: {}, errs: {} };
+  var CONF = { strong: ['good', 'Looks right'], maybe: ['info', 'Is this the one?'], conflict: ['warn', 'Two fit: you pick'], unsure: ['warn', 'Not sure'], none: ['mute', 'No match found'] };
+  function bmItem(id) { return bm.items.filter(function (x) { return x.id === id; })[0]; }
+  function bmLoad(force) {
+    if (!admin() || bm.loading) return;
+    if (!force && bm.loaded && Date.now() - bm.at < 20000) return;
+    bm.loading = true;
+    api('obwBankSuggest', []).then(function (r) {
+      bm.loading = false; bm.loaded = true; bm.at = Date.now(); bm.err = '';
+      var old = {}; bm.items.forEach(function (x) { old[x.id] = x; });
+      bm.items = (r.items || []).map(function (x) { var o = old[x.id]; if (o && o.claude && !x.claude && o.amount === x.amount) { x.proposal = o.proposal; x.claude = true; } return x; });
+      bm.options = r.options || bm.options; bmPaint(); bmAsk();
+    }, function (e) { bm.loading = false; bm.loaded = true; bm.at = Date.now(); bm.err = e.message; bmPaint(); });
+  }
+  /** Claude judges the lines the rules were unsure about, once, using the invoices, costs, projects and shoots in the app. */
+  function bmAsk() {
+    var ids = bm.items.filter(function (x) { return x.proposal.strength !== 'strong' && !x.claude && !bm.asked[x.id]; }).slice(0, 12).map(function (x) { return x.id; });
+    if (!ids.length || bm.asking) return;
+    ids.forEach(function (id) { bm.asked[id] = 1; }); bm.asking = ids.length; bm.askErr = ''; bmPaint();
+    api('obwBankAsk', [ids]).then(function (r) {
+      bm.asking = 0;
+      Object.keys(r.results || {}).forEach(function (id) { var it = bmItem(id); if (it) { it.proposal = r.results[id]; it.claude = true; delete bm.sel[id]; delete bm.edit[id]; } });
+      bmPaint(); bmAsk();
+    }, function (e) { bm.asking = 0; bm.askErr = e.message; bmPaint(); });
+  }
+  function bmSel(it) { return bm.sel[it.id] || { mode: it.proposal.mode, ref: it.proposal.ref }; }
+  function bmFields(it) {
+    if (!bm.edit[it.id]) { var p = it.proposal; bm.edit[it.id] = { client: p.client || '', project: p.project || '', shoot: p.shoot || '', payee: p.payee || '', cost_type: p.cost_type || (it.direction === 'debit' ? 'Other' : ''), description: p.description || '', invoice: '' }; }
+    return bm.edit[it.id];
+  }
+  function bmOpenInvoices(client) {
+    return (DATA.invoices || []).filter(function (i) { return i.status !== 'draft' && i.status !== 'paid' && i.status !== 'void' && !(window.invLegacy && invLegacy(i)) && (window.invBal ? invBal(i) > 0.005 : true) && (!client || i.client === client); });
+  }
+  function bmSelect(id, field, list, val, blank) {
+    var has = !val || list.some(function (o) { return o[0] === val; });
+    return '<select class="f" data-bmf="' + e_(id + '|' + field) + '">' + (blank != null ? '<option value="">' + e_(blank) + '</option>' : '') + (has ? '' : '<option value="' + e_(val) + '" selected>' + e_(val) + '</option>') +
+      list.map(function (o) { return '<option value="' + e_(o[0]) + '"' + (o[0] === val ? ' selected' : '') + '>' + e_(o[1]) + '</option>'; }).join('') + '</select>';
+  }
+  function bmForm(it, correcting) {
+    var f = bmFields(it), credit = it.direction === 'credit', O = bm.options;
+    var projs = O.projects.filter(function (p) { return !f.client || p.client === f.client || p.id === f.project; });
+    var shoots = O.shoots.filter(function (s) { return s.project === f.project; });
+    var h = '<div class="bm-form">' + (correcting ? '<p class="note">Not right? Correct it below. Nothing is saved until you approve.</p>' : '') + '<div class="bm-grid">' +
+      fld('Client', bmSelect(it.id, 'client', O.clients.map(function (c) { return [c, c]; }), f.client, 'No client / not sure')) +
+      fld('Project', bmSelect(it.id, 'project', projs.map(function (p) { return [p.id, p.name]; }), f.project, 'No project (company overhead)')) +
+      fld('Shoot', bmSelect(it.id, 'shoot', shoots.map(function (s) { return [s.name, s.name]; }), f.shoot, f.project ? 'Whole project / no shoot' : 'Choose a project first')) +
+      fld(credit ? 'Received from' : 'Paid to', '<input class="f" data-bmf="' + e_(it.id + '|payee') + '" value="' + e_(f.payee) + '" list="bm-payees">') +
+      (credit ? fld('Invoice it pays (optional)', bmSelect(it.id, 'invoice', bmOpenInvoices(f.client).map(function (i) { return [i.number, i.number + ' · ' + (i.subject || i.client) + ' · ' + m0(window.invBal ? invBal(i) : i.total)]; }), f.invoice, 'Not an invoice payment')) :
+        fld('Cost type', bmSelect(it.id, 'cost_type', costTypes().map(function (c) { return [c, c]; }), f.cost_type))) +
+      fld('What for', '<input class="f" data-bmf="' + e_(it.id + '|description') + '" value="' + e_(f.description) + '">') + '</div></div>';
+    return h;
+  }
+  function bmCand(it, c, kind) {
+    var selected = bmSel(it), key = kind === 'invoice' ? c.number : c.ids.join(','), on = selected.mode === (kind === 'invoice' ? 'invoice' : c.type) && selected.ref === key;
+    var title = kind === 'invoice' ? '<b>' + e_(c.number) + '</b> · ' + e_(c.client) : '<b>' + e_(c.payee) + '</b> · ' + (c.type === 'group' ? 'split bill' : e_(c.id));
+    var sub = kind === 'invoice' ? e_(c.subject || 'No subject') + (c.project ? ' · ' + e_((project(c.project) || {}).name || c.project) : '') : e_(c.description || '') + (c.project ? ' · ' + e_(c.project) : '') + (c.shoot ? ' · ' + e_(c.shoot) : '');
+    var amt = kind === 'invoice' ? 'Owes ' + m_(c.balance) : m_(c.amount);
+    return '<button type="button" class="bm-cand' + (on ? ' on' : '') + '" data-bmpick="' + e_(it.id + '|' + (kind === 'invoice' ? 'invoice' : c.type) + '|' + key) + '" aria-pressed="' + on + '"><span class="bm-radio"></span><span class="bm-ct"><span>' + title + '</span><small>' + sub + '</small><small class="bm-why">' + e_(c.why) + (c.paid ? ' · already marked paid' : '') + (c.legacy ? ' · old Zoho invoice' : '') + '</small></span><span class="bm-amt">' + amt + '</span></button>';
+  }
+  function bmCardHtml(it) {
+    var p = it.proposal, st = CONF[p.strength] || CONF.none, sel = bmSel(it), credit = it.direction === 'credit', busy = bm.busy[it.id];
+    var cands = credit ? it.invoices : it.entries, kind = credit ? 'invoice' : 'entry', isNew = sel.mode === 'new' || sel.mode === 'income';
+    var newOn = isNew;
+    var h = '<div class="bm-card' + (busy ? ' busy' : '') + '" data-bmcard="' + e_(it.id) + '"><div class="bm-top"><div class="bm-line"><span class="mono">' + e_(nice(it.date)) + ' · ' + (credit ? 'Money in' : 'Money out') + '</span><b class="bm-text">' + e_(it.text) + '</b></div><span class="bm-big ' + (credit ? 'in' : '') + '">' + (credit ? '+' : '−') + ' ' + m_(it.amount) + '</span></div>' +
+      '<div class="bm-sugg"><span class="tag ' + st[0] + '">' + st[1] + '</span>' + (it.claude ? '<span class="tag info">Claude checked</span>' : '') + '<span class="note">' + e_(p.why || '') + '</span></div>';
+    if (cands.length) {
+      h += '<div class="bm-cands"><span class="mono">' + (credit ? 'Invoices it could be' : 'Already in your books') + '</span>' + cands.map(function (c) { return bmCand(it, c, kind); }).join('') +
+        '<button type="button" class="bm-cand' + (newOn ? ' on' : '') + '" data-bmpick="' + e_(it.id + '|' + (credit ? 'income' : 'new') + '|') + '" aria-pressed="' + newOn + '"><span class="bm-radio"></span><span class="bm-ct"><span><b>None of these</b>: ' + (credit ? 'record as new income' : 'create a new cost') + '</span></span></button></div>';
+    }
+    if (isNew || bm.open[it.id]) h += bmForm(it, bm.open[it.id] && !isNew);
+    var label = sel.mode === 'invoice' ? 'Approve: mark ' + sel.ref + ' paid' : sel.mode === 'entry' ? 'Approve: link to ' + sel.ref : sel.mode === 'group' ? 'Approve: pay this split bill' : credit ? 'Approve: create income' : 'Approve: create cost';
+    if (isNew) { var f = bmFields(it); label += (f.project ? ' on ' + e_(((project(f.project) || {}).name || f.project).slice(0, 28)) : '') + (f.shoot ? ' · ' + e_(f.shoot) : ''); }
+    if (bm.open[it.id] && !isNew) label = 'Approve with my changes';
+    if (bm.errs[it.id]) h += '<p class="bm-err" role="alert">' + e_(bm.errs[it.id]) + '</p>';
+    h += '<div class="btnrow bm-acts"><button type="button" class="btn primary obx-sm" data-bmgo="' + e_(it.id) + '"' + (busy ? ' disabled' : '') + '>' + (busy ? 'Saving…' : label) + '</button>' +
+      (bm.open[it.id] ? '<button type="button" class="btn obx-sm" data-bmreject="' + e_(it.id) + '">Cancel</button><button type="button" class="btn obx-sm ic-del" data-bmignore="' + e_(it.id) + '">Ignore this line</button>' :
+        '<button type="button" class="btn obx-sm" data-bmreject="' + e_(it.id) + '"' + (busy ? ' disabled' : '') + '>Reject: correct it</button>') + '</div></div>';
+    return h;
+  }
+  function bmPanelHtml() {
+    if (!admin()) return '';
+    if (bm.err) return '<div class="panel bm-panel"><span class="h2big">Bank matches</span><div class="banner" style="margin:0">Could not work out matches: ' + e_bmErr() + ' <a class="link" data-bmreload tabindex="0">Try again</a></div></div>';
+    if (!bm.loaded) return '<div class="panel bm-panel"><span class="h2big">Bank matches</span><div class="note">Looking at your bank lines…</div></div>';
+    if (!bm.items.length) return '';
+    return '<div class="panel bm-panel"><div class="bm-head"><div><span class="h2big">Bank matches · ' + bm.items.length + '</span><div class="note">Each line from your statements, matched against your invoices, bills, projects and shoots. Nothing is booked until you approve it.</div></div></div>' +
+      (bm.asking ? '<div class="bm-status"><span class="ob-spin bm-spin"></span>Claude is checking ' + bm.asking + ' uncertain line' + (bm.asking === 1 ? '' : 's') + ' against the app…</div>' : '') +
+      (bm.askErr ? '<div class="note bm-askerr">Claude could not check the uncertain lines (' + e_(bm.askErr) + '). The rule-based suggestions are shown.</div>' : '') +
+      dl('bm-payees', payees()) + '<div class="bm-list">' + bm.items.map(bmCardHtml).join('') + '</div></div>';
+  }
+  function e_bmErr() { return e_(bm.err); }
+  /** Repaints only the match panel (and a single card when given), so the page never jumps. */
+  function bmPaint(id) {
+    var host = $('obx-bm'); if (!host) return;
+    if (id) { var c = host.querySelector('[data-bmcard="' + id + '"]'), it = bmItem(id); if (c && it) { var t = document.createElement('div'); t.innerHTML = bmCardHtml(it); c.replaceWith(t.firstChild); return; } }
+    host.innerHTML = bmPanelHtml();
+  }
+  OBX.bankMatches = function () { if (!admin()) return ''; setTimeout(function () { bmLoad(); }, 0); return '<div id="obx-bm">' + bmPanelHtml() + '</div>'; };
+
+  function bmChoice(it) {
+    var sel = bmSel(it), f = bmFields(it);
+    if (bm.open[it.id] && (sel.mode === 'invoice' || sel.mode === 'entry' || sel.mode === 'group')) { /* correcting a match: use the form */ sel = { mode: it.direction === 'credit' ? 'income' : 'new' }; }
+    if ((sel.mode === 'new' || sel.mode === 'income') && f.invoice) return { mode: 'invoice', ref: f.invoice };
+    if (sel.mode === 'new' || sel.mode === 'income') return { mode: sel.mode, client: f.client, project: f.project, shoot: f.shoot, payee: f.payee, cost_type: f.cost_type, description: f.description };
+    return { mode: sel.mode, ref: sel.ref };
+  }
+  function bmApprove(id) {
+    var it = bmItem(id); if (!it || bm.busy[id]) return;
+    var ch = bmChoice(it);
+    if ((ch.mode === 'new' || ch.mode === 'income') && !String(ch.payee || '').trim()) { bm.errs[id] = 'Enter who ' + (it.direction === 'credit' ? 'paid' : 'was paid') + '.'; bmPaint(id); return; }
+    bm.busy[id] = 1; delete bm.errs[id]; bmPaint(id);
+    api('obwBankApply', [id, ch]).then(function (r) {
+      var card = document.querySelector('[data-bmcard="' + id + '"]');
+      var done = function () {
+        bm.items = bm.items.filter(function (x) { return x.id !== id; }); delete bm.busy[id];
+        bmPaint(); renderNav();
+        say('Approved: ' + (ch.mode === 'invoice' ? ch.ref + ' marked paid' : ch.mode === 'entry' || ch.mode === 'group' ? 'linked to ' + r.ref : 'new ' + (it.direction === 'credit' ? 'income' : 'cost') + ' ' + r.ref + ' created'), true);
+        if (window.reloadData) reloadData(function () { if (state.view === 'bank') { /* keep the page as it is */ } }); else rerender();
+      };
+      if (card) collapse(card, done); else done();
+    }, function (e) { delete bm.busy[id]; bm.errs[id] = e.message; bmPaint(id); });
+  }
+  function bmIgnore(id, btn) {
+    if (btn.getAttribute('data-armed') !== '1') { btn.setAttribute('data-armed', '1'); btn.textContent = 'Tap again to ignore'; return; }
+    btn.disabled = true; btn.textContent = 'Ignoring…';
+    api('rejectItem', [id, 'Ignored from the bank match list']).then(function () {
+      var card = document.querySelector('[data-bmcard="' + id + '"]');
+      var done = function () { bm.items = bm.items.filter(function (x) { return x.id !== id; }); bmPaint(); renderNav(); say('Ignored. The bank line is marked as not for the books.', true); };
+      if (card) collapse(card, done); else done();
+    }, function (e) { btn.disabled = false; btn.removeAttribute('data-armed'); btn.textContent = 'Ignore this line'; bm.errs[id] = e.message; bmPaint(id); });
+  }
+  document.addEventListener('change', function (ev) {
+    var el = ev.target, k = el.getAttribute && el.getAttribute('data-bmf'); if (!k) return;
+    var p = k.split('|'), it = bmItem(p[0]); if (!it) return; var f = bmFields(it); f[p[1]] = el.value;
+    if (p[1] === 'client') { var pr = project(f.project); if (pr && f.client && pr.client !== f.client) { f.project = ''; f.shoot = ''; } if (!f.invoice || (bmOpenInvoices(f.client).every(function (i) { return i.number !== f.invoice; }))) f.invoice = ''; if (!f.payee || it.direction === 'credit') f.payee = f.client || f.payee; }
+    if (p[1] === 'project') { f.shoot = ''; var pr2 = project(el.value); if (pr2 && pr2.client) f.client = pr2.client; }
+    if (p[1] === 'invoice' && el.value) { var iv = (DATA.invoices || []).filter(function (i) { return i.number === el.value; })[0]; if (iv) { f.client = iv.client; f.project = iv.project || f.project; f.payee = iv.client; } }
+    if (/^(client|project|invoice)$/.test(p[1])) { var a = document.activeElement && document.activeElement.getAttribute && document.activeElement.getAttribute('data-bmf'); bmPaint(p[0]); var back = document.querySelector('[data-bmf="' + a + '"]'); if (back) back.focus(); }
+  }, true);
+
+  /* ---------- unpaid invoices, ready to screenshot for the client ---------- */
+  function unpaidOf(p) {
+    return (DATA.invoices || []).filter(function (i) { return i.project === p.id && ['draft', 'paid', 'void', 'cancelled'].indexOf(i.status) === -1 && !(window.invLegacy && invLegacy(i)); })
+      .map(function (i) { var bal = n_(i.total) - n_(i.advance_applied) - (i.status === 'paid' ? 0 : n_(i.paid_amount)); return { number: i.number, subject: String(i.subject || '').trim() || ((shootOfInvoice(i.number) || {}).name) || ('Invoice for ' + p.name), balance: Math.round(bal * 100) / 100, part: n_(i.paid_amount) > 0 }; })
+      .filter(function (i) { return i.balance > 0.005; }).sort(function (a, b) { return String(a.number).localeCompare(String(b.number)); });
+  }
+  function shootOfInvoice(no) { return shoots.list.filter(function (s) { return s.invoice_no === no; })[0]; }
+  OBX.unpaidBlock = function (p) {
+    var l = unpaidOf(p); if (!l.length) return '';
+    var tot = l.reduce(function (t, i) { return t + i.balance; }, 0);
+    return '<div class="sec uip-wrap"><div class="uip" id="uip-' + e_(p.id) + '"><div class="uip-bar"></div><div class="uip-in"><div class="uip-top"><span class="uip-brand">OFFSET MEDIA</span><span class="uip-date">As at ' + e_(nice(today())) + '</span></div>' +
+      '<h3 class="uip-h">Unpaid invoices</h3><p class="uip-sub">' + e_(p.client || '') + (p.client ? ' · ' : '') + e_(p.name) + '</p>' +
+      '<table class="uip-t"><thead><tr><th>Invoice</th><th>Subject</th><th class="r">Amount (LKR)</th></tr></thead><tbody>' + l.map(function (i) { return '<tr><td class="no">' + e_(i.number) + '</td><td>' + e_(i.subject) + '</td><td class="r">' + m_(i.balance) + '</td></tr>'; }).join('') + '</tbody>' +
+      '<tfoot><tr><td colspan="2">Total unpaid</td><td class="r">' + m_(tot) + '</td></tr></tfoot></table></div></div>' +
+      '<div class="btnrow uip-acts"><button class="btn obx-sm" data-obx="uip-copy" data-pid="' + e_(p.id) + '">Copy as image</button><button class="btn obx-sm" data-obx="uip-save" data-pid="' + e_(p.id) + '">Save image</button><span class="note">Ready to screenshot or send to the client. Shows no costs or notes.</span></div></div>';
+  };
+  function uipCanvas(p) {
+    var l = unpaidOf(p), tot = l.reduce(function (t, i) { return t + i.balance; }, 0), S = 2, W = 820, pad = 40, F = '"Inter","Helvetica Neue",Arial,sans-serif';
+    var c = document.createElement('canvas'), x = c.getContext('2d');
+    function wrap(t, w, font) { x.font = font; var words = String(t).split(' '), lines = [], cur = ''; words.forEach(function (wd) { var tt = cur ? cur + ' ' + wd : wd; if (x.measureText(tt).width > w && cur) { lines.push(cur); cur = wd; } else cur = tt; }); if (cur) lines.push(cur); return lines.slice(0, 3); }
+    var rows = l.map(function (i) { return { no: i.number, lines: wrap(i.subject, 380, '500 15px ' + F), amt: m_(i.balance) }; });
+    var H = 40 + 150 + rows.reduce(function (t, r) { return t + 22 + Math.max(1, r.lines.length) * 21; }, 0) + 76 + 30;
+    c.width = W * S; c.height = H * S; x.scale(S, S);
+    x.fillStyle = '#fff'; x.fillRect(0, 0, W, H);
+    var g = x.createLinearGradient(0, 0, W, 0); g.addColorStop(0, '#2B4BFF'); g.addColorStop(.55, '#7838FF'); g.addColorStop(1, '#FF2E8A'); x.fillStyle = g; x.fillRect(0, 0, W, 6);
+    x.fillStyle = '#2B4BFF'; x.font = '800 18px ' + F; x.textBaseline = 'alphabetic'; x.fillText('OFFSET MEDIA', pad, 52);
+    x.fillStyle = '#6B6585'; x.font = '500 13px ' + F; x.textAlign = 'right'; x.fillText('As at ' + nice(today()), W - pad, 52); x.textAlign = 'left';
+    x.fillStyle = '#15122A'; x.font = '800 30px ' + F; x.fillText('Unpaid invoices', pad, 98);
+    x.fillStyle = '#6B6585'; x.font = '500 15px ' + F; x.fillText((p.client ? p.client + ' · ' : '') + p.name, pad, 124);
+    var y = 150; x.strokeStyle = '#15122A'; x.lineWidth = 1.5; x.beginPath(); x.moveTo(pad, y); x.lineTo(W - pad, y); x.stroke();
+    x.fillStyle = '#6B6585'; x.font = '600 11px ' + F; x.fillText('INVOICE', pad, y + 22); x.fillText('SUBJECT', pad + 150, y + 22); x.textAlign = 'right'; x.fillText('AMOUNT (LKR)', W - pad, y + 22); x.textAlign = 'left'; y += 34;
+    rows.forEach(function (r) {
+      y += 22; x.fillStyle = '#15122A'; x.font = '700 15px ' + F; x.fillText(r.no, pad, y); x.font = '500 15px ' + F;
+      r.lines.forEach(function (t, k) { x.fillText(t, pad + 150, y + k * 21); });
+      x.font = '700 15px ' + F; x.textAlign = 'right'; x.fillText(r.amt, W - pad, y); x.textAlign = 'left';
+      y += Math.max(1, r.lines.length) * 21 - 14; x.strokeStyle = '#E6E3F0'; x.lineWidth = 1; x.beginPath(); x.moveTo(pad, y + 8); x.lineTo(W - pad, y + 8); x.stroke(); y += 8;
+    });
+    y += 34; x.fillStyle = '#15122A'; x.font = '700 15px ' + F; x.fillText('Total unpaid', pad, y); x.font = '800 24px ' + F; x.textAlign = 'right'; x.fillStyle = '#2B4BFF'; x.fillText('LKR ' + m_(tot), W - pad, y + 2); x.textAlign = 'left';
+    return c;
+  }
+  function uipImage(p, mode, btn) {
+    var c = uipCanvas(p), name = 'Unpaid-invoices-' + String(p.name).replace(/[^\w]+/g, '-').slice(0, 40) + '.png';
+    function save() { c.toBlob(function (b) { var a = document.createElement('a'); a.href = URL.createObjectURL(b); a.download = name; document.body.appendChild(a); a.click(); a.remove(); setTimeout(function () { URL.revokeObjectURL(a.href); }, 4000); say('Image saved', true); }); }
+    if (mode === 'save' || !(navigator.clipboard && window.ClipboardItem)) { save(); return; }
+    c.toBlob(function (b) {
+      navigator.clipboard.write([new ClipboardItem({ 'image/png': b })]).then(function () { say('Copied. Paste it into WhatsApp or email.', true); }, function () { save(); });
+    });
+  }
+
+  /* ---------- small helpers for smooth lists ---------- */
+  function collapse(node, done) {
+    node.style.height = node.offsetHeight + 'px'; node.offsetHeight; node.classList.add('leaving'); node.style.height = '0px';
+    var fin = false; function end() { if (fin) return; fin = true; done(); } node.addEventListener('transitionend', end); setTimeout(end, 260);
+  }
+  function keepScroll(fn) { var y = window.scrollY; fn(); window.scrollTo(0, y); }
+  function snack(msg, label, fn) {
+    var s = $('obx-snack'); if (!s) { s = document.createElement('div'); s.id = 'obx-snack'; s.setAttribute('role', 'status'); document.body.appendChild(s); }
+    s.innerHTML = '<span></span><button type="button"></button>'; s.firstChild.textContent = msg; var b = s.lastChild; b.textContent = label || ''; b.hidden = !label;
+    b.onclick = function () { s.classList.remove('on'); if (fn) fn(); }; s.classList.add('on'); clearTimeout(snack.h); snack.h = setTimeout(function () { s.classList.remove('on'); }, 7000);
+  }
+
+  function setBusy(card, on, label) {
+    if (!card) return;
+    Array.prototype.forEach.call(card.querySelectorAll('button'), function (b) { b.disabled = on; if (on && b.hasAttribute('data-obxdis') && label) { b.setAttribute('data-was', b.textContent); b.textContent = label; } else if (!on && b.hasAttribute('data-was')) { b.textContent = b.getAttribute('data-was'); b.removeAttribute('data-was'); } });
+    card.classList.toggle('busy', !!on); var er = card.querySelector('.ic-err'); if (er && on) er.remove();
+  }
+  function cardError(card, msg) { if (!card) { say(msg); return; } var er = card.querySelector('.ic-err'); if (!er) { er = document.createElement('p'); er.className = 'ic-err'; er.setAttribute('role', 'alert'); card.querySelector('.ic-acts').before(er); } er.textContent = msg + ' Nothing was changed.'; }
+  /** After an item is dismissed or fixed: fade out that row (and any other row that is now done), then fix the counts. No full redraw, no jump. */
+  function inboxTidy(first, after) {
+    var host = document.querySelector('.obx-issues'); if (!host) { if (after) after(); return; }
+    var nodes = Array.prototype.slice.call(host.querySelectorAll('.ic-issue')).filter(function (n) {
+      if (n === first) return true;
+      var x = null; inbox.messages.forEach(function (m) { (m.issues || []).forEach(function (i) { if (i.key === n.getAttribute('data-ikey')) x = i; }); });
+      return !x || resolved(x);
+    });
+    if (!nodes.length) { if (after) after(); return; }
+    var left = nodes.length;
+    nodes.forEach(function (n) { collapse(n, function () { n.remove(); if (--left === 0) { inboxCount(); if (after) after(); } }); });
+  }
+  function inboxCount() {
+    var host = document.querySelector('.obx-issues'); if (!host) return;
+    Array.prototype.slice.call(host.querySelectorAll('.ic-group')).forEach(function (g) {
+      var n = 0, sib = g.nextElementSibling; while (sib && !sib.classList.contains('ic-group')) { if (sib.classList.contains('ic-issue')) n++; sib = sib.nextElementSibling; }
+      if (!n) g.remove(); else { var c = g.querySelector('.note'); if (c) c.textContent = n; }
+    });
+    if (!host.querySelector('.ic-issue')) { host.outerHTML = '<p class="note ic-empty">Nothing to fix. 🎉</p>'; }
+    var sel = inbox.messages.filter(function (m) { return m.id === inbox.sel; })[0] || inbox.messages[0], li = document.querySelector('.obx-msg.on');
+    if (sel && li) { var hi = (sel.issues || []).filter(function (x) { return x.severity === 'high' && !resolved(x); }).length, tg = li.querySelector('.tag'); if (tg && !hi) tg.remove(); else if (tg) tg.textContent = hi + ' urgent'; }
+  }
+
   /* ---------- clicks (capture phase, so legacy handlers never see ours) ---------- */
   document.addEventListener('click', function (ev) {
     var t = ev.target; if (!t.closest) return;
     var menu = $('obx-menu');
     if (menu && !menu.hidden && !t.closest('.obx-addwrap')) menu.hidden = true;
     if (t.closest('#obx-modal [data-act]')) closeM();   // e.g. "+ Add cost to this shoot" opens the original cost form
-    var el = t.closest('[data-obx],[data-obxbill],[data-obxrev],[data-obxsplit],[data-obxover],[data-obxmsg],[data-obxfix],[data-obxdis],[data-obxdel]');
+    var el = t.closest('[data-obx],[data-obxbill],[data-obxrev],[data-obxsplit],[data-obxover],[data-obxmsg],[data-obxfix],[data-obxdis],[data-obxdel],[data-bmgo],[data-bmpick],[data-bmreject],[data-bmignore],[data-bmreload],[data-obxundo]');
     if (!el) { if (menu && t.closest('#obx-menu [data-act]')) menu.hidden = true; return; }
     ev.stopPropagation(); ev.preventDefault();
     var a = el.getAttribute('data-obx');
@@ -800,6 +1032,7 @@
     else if (a === 'goai') { state.etab = 'ai'; go('entries'); }
     else if (a === 'runcheck') runCheck('manual', el);
     else if (a === 'refresh') refresh();
+    else if (a === 'uip-copy' || a === 'uip-save') { var up0 = project(el.getAttribute('data-pid')); if (up0) uipImage(up0, a === 'uip-save' ? 'save' : 'copy', el); }
     else if (a === 'theme-flip') OBX.setTheme(document.documentElement.getAttribute('data-theme') === 'light' ? 'dark' : 'light');
     else if (a === 'theme') OBX.setTheme(el.getAttribute('data-theme-pref'));
     else if (a === 'signout') window.OBSignOut && window.OBSignOut();
@@ -815,18 +1048,38 @@
     else if (el.hasAttribute('data-obxmsg')) { inbox.sel = el.getAttribute('data-obxmsg'); go('inbox'); }
     else if (el.hasAttribute('data-obxfix')) { try { fix(JSON.parse(el.getAttribute('data-obxfix'))); } catch (x) { /* ignore */ } }
     else if (el.hasAttribute('data-obxdel')) {
-      var did = el.getAttribute('data-obxdel'), de = findEntry(did); if (!de) { go(state.view); return; }
+      var did = el.getAttribute('data-obxdel'), de = findEntry(did); if (!de) { inboxTidy(); return; }
       if (el.getAttribute('data-armed') !== '1') { el.setAttribute('data-armed', '1'); el.textContent = 'Tap again to delete LKR ' + m0(de.amount); return; }
-      el.disabled = true; el.textContent = 'Deleting…';
+      var card = el.closest('.ic-issue'); setBusy(card, true, 'Deleting…');
       api('obwDeleteEntry', [did, 'Deleted from the Inbox check']).then(function () {
-        DATA.entries = DATA.entries.filter(function (x) { return String(x.id) !== did; }); rerender(); say('Deleted ' + (de.payee || 'the line') + ', LKR ' + m0(de.amount) + '. It is kept in the audit log.', true);
-      }, function (e) { el.disabled = false; el.removeAttribute('data-armed'); el.textContent = 'Delete this one'; say(e.message); });
+        DATA.entries = DATA.entries.filter(function (x) { return String(x.id) !== did; }); try { window.C = compute(); } catch (x) { /* ignore */ }
+        inboxTidy(); say('Deleted ' + (de.payee || 'the line') + ', LKR ' + m0(de.amount) + '. It is kept in the audit log.', true);
+      }, function (e) { setBusy(card, false); el.removeAttribute('data-armed'); el.textContent = 'Delete this one'; cardError(card, e.message); });
     }
     else if (el.hasAttribute('data-obxdis')) {
-      var key = el.getAttribute('data-obxdis');
-      inbox.messages.forEach(function (m) { m.issues = (m.issues || []).filter(function (x) { return x.key !== key; }); }); go('inbox');
-      api('obwInboxAction', ['', 'dismiss', key]).then(function () { say('Dismissed. It won\'t come back in future checks.', true); }, function (e) { say(e.message); });
+      var key = el.getAttribute('data-obxdis'), card2 = el.closest('.ic-issue'), goneList = [];
+      inbox.messages.forEach(function (m) { (m.issues || []).forEach(function (x) { if (x.key === key) goneList.push([m, x]); }); });
+      setBusy(card2, true, 'Dismissing…');
+      api('obwInboxAction', ['', 'dismiss', key]).then(function () {
+        inbox.messages.forEach(function (m) { m.issues = (m.issues || []).filter(function (x) { return x.key !== key; }); });
+        var next = card2 && card2.nextElementSibling, parent = card2 && card2.parentNode;
+        inboxTidy(card2, function () {
+          snack('Dismissed. It will not come back.', 'Undo', function () {
+            api('obwInboxAction', ['', 'undismiss', key]).then(function () {
+              goneList.forEach(function (g) { g[0].issues = (g[0].issues || []).concat([g[1]]); });
+              keepScroll(function () { go('inbox'); }); say('Restored', true);
+            }, function (e) { say(e.message); });
+          });
+        });
+      }, function (e) { setBusy(card2, false); cardError(card2, e.message); });
     }
+    else if (el.hasAttribute('data-bmgo')) bmApprove(el.getAttribute('data-bmgo'));
+    else if (el.hasAttribute('data-bmpick')) {
+      var bp = el.getAttribute('data-bmpick').split('|'), bit = bmItem(bp[0]); if (bit) { bm.sel[bp[0]] = { mode: bp[1], ref: bp[2] }; delete bm.errs[bp[0]]; bmPaint(bp[0]); }
+    }
+    else if (el.hasAttribute('data-bmreject')) { var rid = el.getAttribute('data-bmreject'); bm.open[rid] = !bm.open[rid]; if (bm.open[rid]) { delete bm.edit[rid]; } bmPaint(rid); }
+    else if (el.hasAttribute('data-bmignore')) bmIgnore(el.getAttribute('data-bmignore'), el);
+    else if (el.hasAttribute('data-bmreload')) { bm.err = ''; bm.loaded = false; bmPaint(); bmLoad(true); }
   }, true);
   document.addEventListener('keydown', function (ev) {
     if (ev.key === 'Escape' && $('obx-modal')) { closeM(); return; }

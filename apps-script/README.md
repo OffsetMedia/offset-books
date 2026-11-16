@@ -13,6 +13,14 @@ Invoices, quotes, emailing, payments, the bank, vendors, crew and settings all r
 5. Google asks you to approve new permissions: Calendar (for matching bills to shoot days) and "run when you're not there" (the weekly check). Allow both.
 6. Open the app, go to **Inbox**, and tap **Run check now** once. That runs the first check and switches on the Monday-morning weekly check.
 
+## Bank matching (new)
+
+Banking now lists every bank line waiting in Approvals with a suggestion: the invoice it pays, a cost or split bill already in your books, or a new entry with a guessed client, project and shoot. Rules run first. Claude checks the uncertain lines against your open invoices (subjects included), unpaid costs, projects, shoots and calendar, and can only pick records that exist. Nothing is booked until you approve.
+
+- Paying an invoice uses your existing `recordPayment` in `Code.gs`, so invoices behave exactly as before.
+- Lines nothing fits, or where two records fit equally, also appear in the Inbox.
+- Old Zoho invoices ("Imported from Zoho. Before the app's books start") and drafts are never counted as owed and never offered as a match.
+
 ## What the new parts write
 
 - **Entries**: lines from split bills and approved bills. Two columns are added on first use: `bill_id` (links the lines of one bill) and `allocation` (`overhead`).

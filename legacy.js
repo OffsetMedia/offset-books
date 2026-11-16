@@ -380,7 +380,8 @@ function vProject(){
       (ROLE==='admin'||ROLE==='viewer'?'<button class="chip" data-act="new-entry" data-project="'+esc(p.id)+'">'+(ROLE==='admin'?'+ Add cost':'+ Submit a cost')+'</button>':'')+
       (s.missing?'<span class="mono" style="color:var(--warn);margin:0">'+s.missing+(s.missing===1?' document missing':' documents missing')+'</span>':'')+'</div>'+
       '<div class="tablewrap" style="border:0;border-radius:0"><table><thead><tr><th>Shoot</th><th>Paid to</th><th>What for</th><th class="r">Amount</th><th>Paid</th><th>Document</th></tr></thead><tbody>'+crows+'</tbody></table></div>'+more+'</div>'+
-    (p.notes?'<div class="sec"><h3>Notes</h3><p class="note">'+esc(p.notes)+'</p></div>':'');
+    (p.notes?'<div class="sec"><h3>Notes</h3><p class="note">'+esc(p.notes)+'</p></div>':'')+
+    OBX.unpaidBlock(p);
 }
 
 /* ---------- clients, crew ---------- */
@@ -460,6 +461,9 @@ function projName(id){var p=DATA.projects.filter(function(x){return x.id===id;})
 function invDue(i){return r2(num(i.total)-num(i.advance_applied));}
 function invPaid(i){return i.status==='paid'?invDue(i):num(i.paid_amount);}
 function invBal(i){return i.status==='draft'?invDue(i):Math.max(0,r2(invDue(i)-invPaid(i)));}
+/* Old Zoho invoices kept for the audit trail (before the app's books start): never counted as owed. */
+function invLegacy(i){var n=String(i.notes||'');return /imported from zoho/i.test(n)&&/before the app/i.test(n);}
+function invOwed(i){return invLegacy(i)?0:invBal(i);}
 function invStatus(i){
   var s=i.status; if(s==='draft'||s==='paid') return s;
   var due=String(i.due||'').slice(0,10);
@@ -514,7 +518,7 @@ function vDocs(){
     cards='<div class="grid g3">'+card('Waiting for an answer',lkr(open),'',nOpen+(nOpen===1?' quote':' quotes'))+card('Approved, not invoiced',lkr(appr),'',nAppr+(nAppr===1?' quote':' quotes'))+card('Drafts',lkr(dr),'',nDr+(nDr===1?' draft':' drafts'))+'</div>';
   } else {
     var out=0,over=0,nOver=0,dr2=0,nDr2=0;
-    list.forEach(function(i){var s=invStatus(i);if(s==='draft'){dr2+=invDue(i);nDr2++;}else if(s!=='paid'){var b=invBal(i);out+=b;if(s==='overdue'){over+=b;nOver++;}}});
+    list.forEach(function(i){var s=invStatus(i);if(s==='draft'){dr2+=invDue(i);nDr2++;}else if(s!=='paid'){var b=invOwed(i);out+=b;if(s==='overdue'&&b>0){over+=b;nOver++;}}});
     cards='<div class="grid g3">'+card('Outstanding',lkr(out),'','Sent and not fully paid')+card('Overdue',lkr(over),over>0?'neg':'',nOver+(nOver===1?' invoice':' invoices'))+card('Drafts',lkr(dr2),'',nDr2+(nDr2===1?' draft':' drafts'))+'</div>';
   }
   var rows=list.slice().sort(function(a,b){return String(b.date).localeCompare(String(a.date))||String(b.number).localeCompare(String(a.number));}).filter(function(d){
@@ -1327,7 +1331,7 @@ function vBank(){
     var c=x.counts||{},bits=[];['queued','posted','reversed','adjusted','ignored','new'].forEach(function(k){if(c[k]) bits.push(c[k]+' '+(k==='new'?'unsorted':k));});
     return '<tr><td>'+esc(String(x.from).slice(0,10))+' to '+esc(String(x.to).slice(0,10))+'</td><td class="r num">'+esc(x.lines)+'</td><td class="r num">'+fmt2(x.opening)+'</td><td class="r num">'+fmt2(x.closing)+'</td><td>'+esc(bits.join(' · '))+'</td><td>'+(x.file_url?'<a class="link" href="'+esc(x.file_url)+'" target="_blank" rel="noopener">PDF</a>':'')+'</td></tr>';
   }).join('');
-  return head+cards+'<div class="grid g2" style="margin-top:14px">'+up+test+'</div>'+
+  return head+cards+OBX.bankMatches(b)+'<div class="grid g2" style="margin-top:14px">'+up+test+'</div>'+
     '<div class="sec"><h3>Statements</h3><div class="tablewrap"><table><thead><tr><th>Period</th><th class="r">Lines</th><th class="r">Opening</th><th class="r">Closing</th><th>Status of lines</th><th></th></tr></thead><tbody>'+(rows||'<tr><td colspan="6" class="empty">No statements imported yet.</td></tr>')+'</tbody></table></div></div>'+
     '<p class="note" style="margin-top:12px">Sorting rules live in the Rules tab of the database sheet. Everything Claude or a rule suggests goes to Approvals first.</p>';
 }
@@ -1574,7 +1578,7 @@ function payEvents(ym){
   [[8,15,'Tax instalment'],[11,15,'Tax instalment'],[2,15,'Tax instalment'],[5,15,'Tax instalment'],[9,30,'Final tax payment'],[11,30,'Tax return due']].forEach(function(t){if(t[0]===mth) add(t[1],{t:t[2],c:'#E8A33D'});});
   (DATA.invoices||[]).forEach(function(i){
     if(!i.due||String(i.due).slice(0,7)!==ym||i.status==='paid'||i.status==='draft') return;
-    var b=invBal(i); if(b<=0.005) return;
+    var b=invOwed(i); if(b<=0.005) return;
     add(+String(i.due).slice(8,10),{t:shortClient(i.client)+' owes '+fmt(b),c:'#2FBF8F'});
   });
   return ev;
