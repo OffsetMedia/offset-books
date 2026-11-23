@@ -1,5 +1,5 @@
 // Build number and saved theme, applied before anything draws (kept out of index.html so the security policy needs no inline scripts).
-window.OB_BUILD = "2026-11-23.3";
+window.OB_BUILD = "2026-11-23.4";
 (function () {
   var t = 'dark'; try { t = localStorage.getItem('ob_theme') || 'dark'; } catch (e) { /* private mode */ }
   if (t === 'auto') t = (window.matchMedia && matchMedia('(prefers-color-scheme: light)').matches) ? 'light' : 'dark';

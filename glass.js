@@ -43,8 +43,9 @@
     slide(nav, nav.querySelector('a.on'), 'nav');
     var v = view();
     main.querySelectorAll('.filters').forEach(function (row, i) {
-      var on = row.querySelector(':scope > .chip.on'); if (!on) return;
-      row.classList.add('gl-slide'); slide(row, on, v + ':' + i);
+      var ons = row.querySelectorAll(':scope > .chip.on');
+      if (ons.length !== 1) { row.classList.remove('gl-slide'); var op = row.querySelector(':scope > .gl-pill'); if (op) op.remove(); return; }
+      row.classList.add('gl-slide'); slide(row, ons[0], v + ':' + i);
     });
   }
 
@@ -121,6 +122,61 @@
     if (e.key === '/' && !/INPUT|TEXTAREA|SELECT/.test(tag) && !e.target.isContentEditable && desk.matches && !doc.querySelector('.mback:not([hidden]), #modal.on, #obx-modal.on')) { e.preventDefault(); q.focus(); }
   });
 
+
+  /* ---------- pass 2: small charts (read-only, drawn from figures the app already computes) ---------- */
+  function svgEl(w, h, body, cls) { return '<svg class="' + cls + '" viewBox="0 0 ' + w + ' ' + h + '" preserveAspectRatio="none" aria-hidden="true" focusable="false">' + body + '</svg>'; }
+  function spark(vals, hi) {
+    var W = 120, H = 36, n = vals.length; if (n < 2) return '';
+    var mx = Math.max.apply(null, vals), mn = Math.min.apply(null, vals.concat([0])); if (mx === mn) mx = mn + 1;
+    var pts = vals.map(function (v, i) { return [i * (W - 8) / (n - 1) + 4, H - 5 - (v - mn) / (mx - mn) * (H - 10)]; });
+    var d = 'M' + pts[0][0].toFixed(1) + ' ' + pts[0][1].toFixed(1);
+    for (var k = 0; k < n - 1; k++) { // smooth (Catmull-Rom to Bezier), clamped so the curve never overshoots the data
+      var p0 = pts[k - 1] || pts[k], p1 = pts[k], p2 = pts[k + 1], p3 = pts[k + 2] || p2;
+      var c1 = [p1[0] + (p2[0] - p0[0]) / 6, p1[1] + (p2[1] - p0[1]) / 6], c2 = [p2[0] - (p3[0] - p1[0]) / 6, p2[1] - (p3[1] - p1[1]) / 6];
+      var lo = Math.min(p1[1], p2[1]), hi2 = Math.max(p1[1], p2[1]); c1[1] = Math.max(lo, Math.min(hi2, c1[1])); c2[1] = Math.max(lo, Math.min(hi2, c2[1]));
+      d += ' C' + c1[0].toFixed(1) + ' ' + c1[1].toFixed(1) + ' ' + c2[0].toFixed(1) + ' ' + c2[1].toFixed(1) + ' ' + p2[0].toFixed(1) + ' ' + p2[1].toFixed(1);
+    }
+    var area = d + ' L' + pts[n - 1][0].toFixed(1) + ' ' + H + ' L' + pts[0][0].toFixed(1) + ' ' + H + ' Z';
+    var last = pts[n - 1];
+    return svgEl(W, H, '<defs><linearGradient id="glsg" x1="0" y1="0" x2="0" y2="1"><stop offset="0" stop-color="currentColor" stop-opacity=".16"/><stop offset="1" stop-color="currentColor" stop-opacity="0"/></linearGradient></defs>' +
+      '<path d="' + area + '" fill="url(#glsg)" stroke="none"/><path class="gl-line" d="' + d + '" fill="none" stroke="currentColor" stroke-width="1.6" vector-effect="non-scaling-stroke" stroke-linecap="round" stroke-linejoin="round"/>' +
+      '<circle cx="' + last[0].toFixed(1) + '" cy="' + last[1].toFixed(1) + '" r="2.6" class="' + (hi ? 'gl-hot' : 'gl-cold') + '"/>', 'gl-spark');
+  }
+  function gauge(r) {
+    var p = Math.max(0, Math.min(1, r)), a = Math.PI * (1 - p), cx = 60, cy = 56, R = 46;
+    var x = cx + R * Math.cos(a), y = cy - R * Math.sin(a);
+    var arc = 'M' + (cx - R) + ' ' + cy + ' A' + R + ' ' + R + ' 0 0 1 ';
+    return '<svg class="gl-gauge" viewBox="0 0 120 64" aria-hidden="true" focusable="false">' +
+      '<path d="' + arc + (cx + R) + ' ' + cy + '" fill="none" stroke="currentColor" stroke-opacity=".14" stroke-width="8" stroke-linecap="round"/>' +
+      (p > 0.002 ? '<path class="gl-garc" d="' + arc + x.toFixed(2) + ' ' + y.toFixed(2) + '" fill="none" stroke-width="8" stroke-linecap="round"/>' : '') +
+      '<circle cx="' + x.toFixed(2) + '" cy="' + y.toFixed(2) + '" r="5" class="gl-gknob"/></svg>';
+  }
+  function charts() {
+    if (view() !== 'dashboard' || typeof window.mo !== 'function' || typeof window.fyMonths !== 'function') return;
+    var ms, m; try { ms = fyMonths(); m = (window.state && state.month) || ms[ms.length - 1]; } catch (e) { return; }
+    var i = ms.indexOf(m); if (i < 0) return;
+    var win = ms.slice(Math.max(0, i - 5), i + 1); if (win.length < 2) return;
+    var rows = win.map(function (x) { var o = mo(x) || {}; return { rev: +o.rev || 0, cost: +o.cost || 0 }; });
+    main.querySelectorAll('.card').forEach(function (c) {
+      if (c.querySelector('.gl-spark')) return;
+      var lab = (c.querySelector('.mono') || {}).textContent || '', vals = null, hi = false;
+      if (/^Profit this month/i.test(lab)) { vals = rows.map(function (r) { return r.rev - r.cost; }); hi = true; }
+      else if (/^Revenue$/i.test(lab.trim())) vals = rows.map(function (r) { return r.rev; });
+      else if (/^Costs$/i.test(lab.trim())) vals = rows.map(function (r) { return r.cost; });
+      if (!vals) return;
+      var wrap = doc.createElement('div'); wrap.className = 'gl-sparkwrap'; wrap.setAttribute('aria-hidden', 'true');
+      wrap.innerHTML = spark(vals, hi) + '<span class="gl-sparkcap">' + win.length + ' months</span>';
+      c.classList.add('gl-hasspark'); c.appendChild(wrap);
+    });
+    main.querySelectorAll('.panel').forEach(function (p) {
+      var t = p.querySelector('.ptitle strong'); if (!t || !/^Claude spend$/.test(t.textContent.trim()) || p.querySelector('.gl-gauge')) return;
+      var bar = p.querySelector('.bar > i'); if (!bar) return;
+      var r = parseFloat(bar.style.width) / 100 || 0;
+      var g = doc.createElement('div'); g.className = 'gl-gaugewrap'; g.innerHTML = gauge(r) + '<span class="gl-gpct">' + Math.round(r * 100) + '%<small>of budget</small></span>';
+      p.classList.add('gl-hasgauge'); p.insertBefore(g, p.querySelector('.bar'));
+    });
+  }
+
   /* ---------- page-in + rolling figures ---------- */
   var lastView = null, timer;
   function roll() {
@@ -147,7 +203,7 @@
       if (lastView !== null) roll();
       lastView = v;
     }
-    topbar(); pills();
+    topbar(); pills(); charts();
   }
 
   /* ---------- wiring ---------- */
