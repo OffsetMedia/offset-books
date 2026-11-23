@@ -68,17 +68,38 @@
     '<div class="gl-search" role="search"><span class="gl-sico">' + I.search + '</span>' +
     '<input id="gl-q" type="search" autocomplete="off" spellcheck="false" placeholder="Search projects, invoices, entries, clients" aria-label="Search" aria-controls="gl-res">' +
     '<kbd>/</kbd><div id="gl-res" role="listbox" hidden></div></div>' +
-    '<button type="button" class="btn primary gl-add" data-act="new-entry">' + I.plus + '<span>Add</span></button>' +
+    '<div class="gl-new"><button type="button" class="btn primary gl-add" aria-haspopup="menu" aria-expanded="false">' + I.plus + '<span>New</span></button>' +
+    '<div class="gl-menu" role="menu" hidden></div></div>' +
     '<button type="button" class="gl-ib" data-obx="theme-flip" aria-label="Switch theme">' + I.sun + '</button>' +
     '<button type="button" class="gl-ib gl-bell" data-view="inbox" aria-label="Inbox">' + I.bell + '<span class="gl-dot" hidden></span></button>';
   main.parentNode.insertBefore(top, main);
+  // "+ New" menu: every item is an existing app action, opened through the app's own click handlers
+  var NEWMENU = [
+    { t: 'Cost or income', s: 'Add an entry', a: 'data-act="new-entry"', roles: ['admin', 'viewer'] },
+    { t: 'Invoice', s: 'Start a new invoice', a: 'data-act="new-inv"', roles: ['admin'] },
+    { t: 'Quote', s: 'Start a new quote', a: 'data-act="new-qt"', roles: ['admin'] },
+    { t: 'Project', s: 'New project, and a new client if you type one', a: 'data-act="pj-new"', roles: ['admin'] },
+    { t: 'Upload bills', s: 'Claude reads and sorts them', a: 'data-obx="upload"', roles: ['admin'] }
+  ];
+  var menu = top.querySelector('.gl-menu'), newBtn = top.querySelector('.gl-add');
+  function menuOpen(on) { menu.hidden = !on; newBtn.setAttribute('aria-expanded', on ? 'true' : 'false'); if (on) { var f = menu.querySelector('button'); if (f) f.focus(); } }
+  newBtn.addEventListener('click', function (e) { e.stopPropagation(); menuOpen(menu.hidden); });
+  menu.addEventListener('click', function () { setTimeout(function () { menuOpen(false); }, 0); });
+  menu.addEventListener('keydown', function (e) {
+    var b = [].slice.call(menu.querySelectorAll('button')), i = b.indexOf(doc.activeElement);
+    if (e.key === 'ArrowDown' || e.key === 'ArrowUp') { e.preventDefault(); b[(i + (e.key === 'ArrowDown' ? 1 : -1) + b.length) % b.length].focus(); }
+    else if (e.key === 'Escape') { menuOpen(false); newBtn.focus(); }
+  });
+  doc.addEventListener('click', function (e) { if (!menu.hidden && !e.target.closest('.gl-new')) menuOpen(false); });
   var crumb = top.querySelector('.gl-crumb'), q = top.querySelector('#gl-q'), res = top.querySelector('#gl-res'), dot = top.querySelector('.gl-dot');
   function topbar() {
     var v = view(), h1 = main.querySelector('h1'), parts = ['Offset Media', LABEL[v] || (v.charAt(0).toUpperCase() + v.slice(1))];
     if ((v === 'project' || v === 'doc' || v === 'edit') && h1) parts.push(h1.textContent.trim());
-    crumb.innerHTML = parts.map(function (p, i) { return (i ? '<span class="gl-sep" aria-hidden="true">›</span>' : '') + '<span' + (i === parts.length - 1 ? ' aria-current="page"' : '') + '>' + esc(p) + '</span>'; }).join('');
-    var add = top.querySelector('.gl-add'); var role = window.ROLE || 'admin';
-    add.hidden = !(role === 'admin' || role === 'viewer');
+    var ch = parts.join('|'); if (crumb.__k !== ch) { crumb.__k = ch; crumb.innerHTML = parts.map(function (p, i) { return (i ? '<span class="gl-sep" aria-hidden="true">›</span>' : '') + '<span' + (i === parts.length - 1 ? ' aria-current="page"' : '') + '>' + esc(p) + '</span>'; }).join(''); }
+    var role = window.ROLE || 'admin', items = NEWMENU.filter(function (x) { return x.roles.indexOf(role) >= 0; });
+    top.querySelector('.gl-new').hidden = !items.length;
+    var mk = items.map(function (x) { return x.t; }).join('|'); if (menu.__k !== mk) { menu.__k = mk;
+    menu.innerHTML = items.map(function (x) { return '<button type="button" role="menuitem" ' + x.a + '><b>' + x.t + '</b><small>' + x.s + '</small></button>'; }).join(''); }
     var n = 0; try { n = (window.OBX && OBX.unread) ? OBX.unread() : 0; } catch (e) {}
     dot.hidden = !n; top.querySelector('.gl-bell').setAttribute('aria-label', n ? 'Inbox, ' + n + ' unread' : 'Inbox');
   }
@@ -203,8 +224,28 @@
       if (lastView !== null) roll();
       lastView = v;
     }
-    topbar(); pills(); charts();
+    topbar(); pills(); charts(); accentSeg();
   }
+
+  /* ---------- accent choice in Settings > Appearance (saved on this device) ---------- */
+  function accentNow() { return root.getAttribute('data-accent') || 'orange'; }
+  function accentSeg() {
+    main.querySelectorAll('.obx-seg[aria-label="Theme"]').forEach(function (seg) {
+      var nx = seg.nextElementSibling;
+      if (!nx || !nx.classList.contains('gl-accent')) {
+        nx = doc.createElement('div'); nx.className = 'obx-seg gl-accent'; nx.setAttribute('role', 'group'); nx.setAttribute('aria-label', 'Accent colour');
+        nx.innerHTML = '<button type="button" class="chip" data-gl-accent="orange">Orange</button><button type="button" class="chip" data-gl-accent="pink">Offset pink</button>';
+        seg.parentNode.insertBefore(nx, seg.nextSibling);
+      }
+      nx.querySelectorAll('[data-gl-accent]').forEach(function (b) { var on = b.getAttribute('data-gl-accent') === accentNow(); if (b.classList.contains('on') !== on) b.classList.toggle('on', on); b.setAttribute('aria-pressed', on ? 'true' : 'false'); });
+    });
+  }
+  doc.addEventListener('click', function (e) {
+    var b = e.target.closest && e.target.closest('[data-gl-accent]'); if (!b) return;
+    var a = b.getAttribute('data-gl-accent'); ls('ob_accent', a);
+    if (a === 'orange') root.removeAttribute('data-accent'); else root.setAttribute('data-accent', a);
+    accentSeg();
+  });
 
   /* ---------- wiring ---------- */
   var q1 = false;

@@ -238,11 +238,7 @@ function vDashboard0(){
   }
 
   /* projects table */
-  var order={'In production':0,'Confirmed':1,'Quoted':2,'Delivered':3};
-  var plist=DATA.projects.filter(function(p){return ['Closed','Cancelled'].indexOf(p.status)<0;}).sort(function(a,b){
-    var x=(order[a.status]==null?9:order[a.status])-(order[b.status]==null?9:order[b.status]);
-    return x||C.byP[b.id].invoiced-C.byP[a.id].invoiced;
-  }).slice(0,8);
+  var plist=DATA.projects.filter(function(p){return ['Closed','Cancelled'].indexOf(p.status)<0;}).sort(byActivity).slice(0,8);
   var prow=plist.map(function(p){
     var s=C.byP[p.id], pct=s.budget?Math.round(s.costs/s.budget*100):null, cls=pct==null?'':(pct>100?'over':(pct>=WARN*100?'warn':'good'));
     return '<tr class="click" data-pid="'+esc(p.id)+'" tabindex="0"><td class="name"><b>'+esc(p.name)+'</b><small>'+esc(shortClient(p.client))+'</small></td><td>'+statusPill(p.status)+'</td>'+
@@ -277,6 +273,18 @@ function vDashboard0(){
 }
 
 /* ---------- projects ---------- */
+/* most recent activity on a project: latest entry, invoice or quote date (or when it was created) */
+var _pAct=null;
+function projActivity(pid){
+  if(!_pAct||_pAct.d!==DATA){ var m={}; function bump(id,d){ d=String(d||'').slice(0,10); if(id&&d&&(!m[id]||d>m[id])) m[id]=d; }
+    (DATA.entries||[]).forEach(function(e){bump(e.project,e.date);bump(e.project,e.paid_date);});
+    (DATA.invoices||[]).forEach(function(i){bump(i.project,i.date);});
+    (DATA.quotes||[]).forEach(function(q){bump(q.project,q.date);});
+    (DATA.projects||[]).forEach(function(p){bump(p.id,p.created_at||p.start_date||p.shoot_date);});
+    _pAct={d:DATA,m:m}; }
+  return _pAct.m[pid]||'';
+}
+function byActivity(a,b){ var x=projActivity(b.id), y=projActivity(a.id); return x<y?-1:(x>y?1:0); }
 function vProjects(){
   var statuses=['Active','All','Quoted','Confirmed','In production','Delivered','Closed','Cancelled'];
   var list=DATA.projects.filter(function(p){
@@ -285,7 +293,7 @@ function vProjects(){
     else if(f!=='All' && p.status!==f) return false;
     var q=state.psearch.toLowerCase();
     return !q || (p.name+' '+p.client+' '+p.property).toLowerCase().indexOf(q)>=0;
-  });
+   }).sort(byActivity);
   var rows=list.map(function(p){
     var s=C.byP[p.id];
     return '<tr class="click" data-pid="'+esc(p.id)+'" tabindex="0">'+
