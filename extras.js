@@ -88,7 +88,7 @@
   function applyTheme(pref) {
     var t = pref === 'auto' ? ((window.matchMedia && matchMedia('(prefers-color-scheme: light)').matches) ? 'light' : 'dark') : pref;
     document.documentElement.setAttribute('data-theme', t);
-    var m = document.querySelector('meta[name=theme-color]'); if (m) m.setAttribute('content', t === 'light' ? '#F5F3FA' : '#07060D');
+    var m = document.querySelector('meta[name=theme-color]'); if (m) m.setAttribute('content', t === 'light' ? '#E9E7E3' : '#121315');
   }
   OBX.setTheme = function (pref) { try { localStorage.setItem('ob_theme', pref); } catch (x) { /* ignore */ } applyTheme(pref); if (window.state) go(state.view); };
   if (window.matchMedia) { try { matchMedia('(prefers-color-scheme: light)').addEventListener('change', function () { if (savedTheme() === 'auto') applyTheme('auto'); }); } catch (x) { /* old Safari */ } }

@@ -352,3 +352,51 @@ select.f, .head select { height: 44px; }
 html, body, main, .obx-inbox, .obx-issues { overflow-anchor: none; }
 [data-theme="light"] td:first-child, [data-theme="light"] .tablewrap td:first-child { background: transparent !important; }
 .card .big, .kpi .big, .tile .big { font-size: clamp(24px, 2.5vw, 34px); }
+
+/* ================= patch 2 (23 Nov): calmer phone chrome, motion, wide screens ================= */
+:root { --ease-out: cubic-bezier(.23, 1, .32, 1); --ease-io: cubic-bezier(.77, 0, .175, 1); }
+
+/* wide screens: use the room, stay centred beside the side panel */
+main { max-width: 1760px; width: 100%; margin-left: auto; margin-right: auto; }
+
+/* sliding selection pill (positioned by glass.js) */
+.gl-ind { position: absolute; left: 0; top: 0; z-index: 0; pointer-events: none; border-radius: 999px; background: var(--bone); opacity: 0;
+  transition: transform 380ms var(--ease-io), width 380ms var(--ease-io), height 380ms var(--ease-io), opacity 200ms ease; will-change: transform; }
+[data-theme="light"] .gl-ind { background: #17181B; }
+nav a { position: relative; z-index: 1; transition: color 260ms var(--ease-out), background-color 200ms ease, transform 160ms var(--ease-out); }
+nav a.on, [data-theme="light"] nav a.on { background: transparent !important; }
+nav::before, nav::after { z-index: 0; }
+
+/* page-in on every screen change */
+@keyframes gl-in { from { opacity: 0; transform: translateY(10px); } to { opacity: 1; transform: none; } }
+main.gl-enter > * { animation: gl-in 320ms var(--ease-out) both; }
+main.gl-enter > *:nth-child(2) { animation-delay: 40ms; } main.gl-enter > *:nth-child(3) { animation-delay: 80ms; }
+main.gl-enter > *:nth-child(4) { animation-delay: 120ms; } main.gl-enter > *:nth-child(n+5) { animation-delay: 160ms; }
+
+/* press and hover feel */
+.btn, .chip, .card, .kpi, .tile { transition: transform 200ms var(--ease-out), background 200ms ease, box-shadow 200ms ease, filter 200ms ease; }
+@media (hover: hover) { tbody tr.click td { transition: background 160ms ease; } .btn:hover:not(:disabled) { transform: translateY(-1px); } }
+.btn:active:not(:disabled), .chip:active { transform: scale(.97); }
+@media (prefers-reduced-motion: reduce) { .gl-ind, nav a, .btn, .chip { transition: none !important; } main.gl-enter > * { animation: none !important; } }
+
+@media (max-width: 820px) {
+  /* smaller, lower tab bar */
+  nav { bottom: calc(10px + env(safe-area-inset-bottom)) !important; padding: 4px !important; border-radius: 30px !important; left: 14px !important; right: 14px !important; }
+  nav a { min-height: 46px !important; padding: 6px 2px !important; gap: 2px !important; font-size: 10.5px !important; }
+  nav a .nico { width: 20px; height: 20px; }
+  nav::before { padding: 1px; }
+  .navbadge { top: 2px !important; }
+  main { padding-bottom: calc(env(safe-area-inset-bottom) + 84px) !important; }
+  #toast, .ob-update { bottom: calc(76px + env(safe-area-inset-bottom)) !important; }
+  .gl-ind { box-shadow: 0 6px 16px -6px rgba(0,0,0,.5); }
+  nav a.on, [data-theme="light"] nav a.on { background: transparent !important; }
+  nav a.on, nav a.on .nico { color: #17181B !important; }
+  [data-theme="light"] nav a.on, [data-theme="light"] nav a.on .nico { color: #F6F5F2 !important; }
+
+  /* app bar: no box around the bell, status bar area matches the page */
+  #obx-appbar { background: rgba(18,19,21,.72); }
+  [data-theme="light"] #obx-appbar { background: rgba(233,231,227,.78); }
+  .ab-btn { background: transparent !important; box-shadow: none !important; width: 44px; height: 44px; border-radius: 999px; }
+  .ab-btn:active { background: rgba(255,255,255,.08) !important; }
+  .ab-dot { top: 4px; right: 4px; min-width: 0; width: 9px; height: 9px; padding: 0; font-size: 0; border: 0; box-shadow: 0 0 0 3px rgba(229,129,79,.22); }
+}
