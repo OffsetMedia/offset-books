@@ -1218,7 +1218,7 @@ function parseHnb(items){
     its.forEach(function(it){if(cur&&Math.abs(it.y-cur.y)<=2) cur.items.push(it); else {cur={y:it.y,items:[it]};lines.push(cur);}});
     lines.forEach(function(ln){
       var ws=[];
-      ln.items.sort(function(a,b){return a.x-b.x;}).forEach(function(it){var w=ws[ws.length-1];if(w&&it.x-w.x1<2.5){w.s+=it.s;w.x1=it.x1;}else ws.push({x:it.x,x1:it.x1,s:it.s});});
+      ln.items.sort(function(a,b){return a.x-b.x;}).forEach(function(it){if(!/\S/.test(it.s)) return; /* newer HNB files pad columns with blank text; skip it so cells don't glue together */ var w=ws[ws.length-1];if(w&&it.x-w.x1<2.5){w.s+=it.s;w.x1=it.x1;}else ws.push({x:it.x,x1:it.x1,s:it.s});});
       ws.forEach(function(w){w.s=w.s.replace(/\s+/g,' ').trim();});
       ws=ws.filter(function(w){return w.s;});
       if(!ws.length) return;
@@ -1242,7 +1242,10 @@ function parseHnb(items){
 function buildStatement(parsed){
   if(!parsed.rows.length) throw new Error('No transaction lines were found in this file. Is it the HNB "Statement and Transaction Report"?');
   if(!parsed.header||parsed.header.length<4) throw new Error('Could not find the opening and closing balances on page 1.');
-  var opening=parsed.header[2],closing=parsed.header[3],chrono=parsed.rows.slice().reverse(),prev=opening,bad=[],out=[];
+  var chrono=parsed.rows.slice().reverse(),closing=parsed.header[3],opening=parsed.header[2];
+  /* some HNB reports give an "opening ledger" from part-way through the period; use whichever opening balance the first line actually follows from */
+  [parsed.header[2],parsed.header[0]].some(function(h){ if(h!=null&&!isNaN(h)&&Math.abs(Math.abs(chrono[0].balance-h)-chrono[0].amount)<=0.015){opening=h;return true;} return false; });
+  var prev=opening,bad=[],out=[];
   chrono.forEach(function(r,i){
     var d=Math.round((r.balance-prev)*100)/100;
     if(Math.abs(Math.abs(d)-r.amount)>0.015) bad.push((i+1)+' ('+r.date+', '+r.amount+')');
