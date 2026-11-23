@@ -948,8 +948,8 @@
     var H = 40 + 150 + rows.reduce(function (t, r) { return t + 22 + Math.max(1, r.lines.length) * 21; }, 0) + 76 + 30;
     c.width = W * S; c.height = H * S; x.scale(S, S);
     x.fillStyle = '#fff'; x.fillRect(0, 0, W, H);
-    var g = x.createLinearGradient(0, 0, W, 0); g.addColorStop(0, '#2B4BFF'); g.addColorStop(.55, '#7838FF'); g.addColorStop(1, '#FF2E8A'); x.fillStyle = g; x.fillRect(0, 0, W, 6);
-    x.fillStyle = '#2B4BFF'; x.font = '800 18px ' + F; x.textBaseline = 'alphabetic'; x.fillText('OFFSET MEDIA', pad, 52);
+    var g = x.createLinearGradient(0, 0, W, 0); g.addColorStop(0, '#17181B'); g.addColorStop(1, '#E5814F'); x.fillStyle = g; x.fillRect(0, 0, W, 4);
+    x.fillStyle = '#17181B'; x.font = '800 18px ' + F; x.textBaseline = 'alphabetic'; x.fillText('OFFSET MEDIA', pad, 52);
     x.fillStyle = '#6B6585'; x.font = '500 13px ' + F; x.textAlign = 'right'; x.fillText('As at ' + nice(today()), W - pad, 52); x.textAlign = 'left';
     x.fillStyle = '#15122A'; x.font = '800 30px ' + F; x.fillText('Unpaid invoices', pad, 98);
     x.fillStyle = '#6B6585'; x.font = '500 15px ' + F; x.fillText((p.client ? p.client + ' · ' : '') + p.name, pad, 124);
@@ -961,7 +961,7 @@
       x.font = '700 15px ' + F; x.textAlign = 'right'; x.fillText(r.amt, W - pad, y); x.textAlign = 'left';
       y += Math.max(1, r.lines.length) * 21 - 14; x.strokeStyle = '#E6E3F0'; x.lineWidth = 1; x.beginPath(); x.moveTo(pad, y + 8); x.lineTo(W - pad, y + 8); x.stroke(); y += 8;
     });
-    y += 34; x.fillStyle = '#15122A'; x.font = '700 15px ' + F; x.fillText('Total unpaid', pad, y); x.font = '800 24px ' + F; x.textAlign = 'right'; x.fillStyle = '#2B4BFF'; x.fillText('LKR ' + m_(tot), W - pad, y + 2); x.textAlign = 'left';
+    y += 34; x.fillStyle = '#15122A'; x.font = '700 15px ' + F; x.fillText('Total unpaid', pad, y); x.font = '800 24px ' + F; x.textAlign = 'right'; x.fillStyle = '#17181B'; x.fillText('LKR ' + m_(tot), W - pad, y + 2); x.textAlign = 'left';
     return c;
   }
   function uipImage(p, mode, btn) {
