@@ -785,20 +785,43 @@
   }
 
   /* ---------- bank matching: approve what each bank line is ---------- */
-  var bm = { items: [], options: { clients: [], projects: [], shoots: [] }, loaded: false, loading: false, at: 0, err: '', asking: 0, askErr: '', asked: {}, sel: {}, edit: {}, open: {}, busy: {}, errs: {} };
+  var bm = { auto: { running: false, done: 0, err: '', list: [] }, items: [], options: { clients: [], projects: [], shoots: [] }, loaded: false, loading: false, at: 0, err: '', asking: 0, askErr: '', asked: {}, sel: {}, edit: {}, open: {}, busy: {}, errs: {} };
   var CONF = { strong: ['good', 'Looks right'], maybe: ['info', 'Is this the one?'], conflict: ['warn', 'Two fit: you pick'], unsure: ['warn', 'Not sure'], none: ['mute', 'No match found'] };
   function bmItem(id) { return bm.items.filter(function (x) { return x.id === id; })[0]; }
   function bmLoad(force) {
     if (!admin() || bm.loading) return;
     if (!force && bm.loaded && Date.now() - bm.at < 20000) return;
     bm.loading = true;
-    api('obwBankSuggest', []).then(function (r) {
+    // first file everything that needs no decision (already in the books, bank charges, fixed rules), then show only what is left
+    var A = bm.auto; A.running = true; A.err = ''; bmPaint();
+    (function autoStep() {
+      api('obwBankAuto', []).then(function (r) {
+        A.done += r.done || 0; bmPaint();
+        if ((r.failed || []).length) A.err = r.failed[0];
+        if (r.done > 0 && r.remaining > 0) return autoStep();
+        A.running = false; if (A.done && window.reloadData) reloadData(function () {}); suggest();
+      }, function (e) { A.running = false; A.err = e.message; suggest(); });
+    })();
+    function suggest() { api('obwBankSuggest', []).then(function (r) {
+      bm.auto.list = r.autoDone || [];
       bm.loading = false; bm.loaded = true; bm.at = Date.now(); bm.err = '';
       var old = {}; bm.items.forEach(function (x) { old[x.id] = x; });
       bm.items = (r.items || []).map(function (x) { var o = old[x.id]; if (o && o.claude && !x.claude && o.amount === x.amount) { x.proposal = o.proposal; x.claude = true; } return x; });
       bm.options = r.options || bm.options; bmPaint(); bmAsk();
-    }, function (e) { bm.loading = false; bm.loaded = true; bm.at = Date.now(); bm.err = e.message; bmPaint(); });
+    }, function (e) { bm.loading = false; bm.loaded = true; bm.at = Date.now(); bm.err = e.message; bmPaint(); }); }
   }
+  function bmAutoHtml() {
+    var A = bm.auto, L = A.list || [];
+    if (A.running) return '<div class="bm-status"><span class="ob-spin bm-spin"></span>Filing the lines that need no decision (already in your books, bank charges, fixed rules)… ' + A.done + ' so far</div>';
+    if (!L.length) return A.err ? '<div class="note bm-askerr">Some lines could not be filed automatically (' + e_(A.err) + '). They are in the list below.</div>' : '';
+    var k = { books: 0, rule: 0, invoice: 0 }; L.forEach(function (x) { k[x.kind] = (k[x.kind] || 0) + 1; });
+    var parts = []; if (k.books) parts.push(k.books + ' already in your books'); if (k.invoice) parts.push(k.invoice + ' invoice payment' + (k.invoice === 1 ? '' : 's')); if (k.rule) parts.push(k.rule + ' by your sorting rules');
+    return '<details class="bm-auto"><summary><b>' + L.length + ' filed automatically</b> in the last 30 days: ' + parts.join(', ') + '. Open to check or undo.</summary><div class="bm-autolist">' +
+      L.map(function (x) { return '<div class="lrow"><span class="l"><span class="d">' + e_(dshortX(x.date)) + '</span><span>' + e_(x.text) + '<small class="note" style="display:block">' + e_(x.why) + '</small></span></span><span class="r"><strong class="num">' + (x.direction === 'credit' ? '+ ' : '- ') + e_(fmtX(x.amount)) + '</strong> <button type="button" class="chip" data-bmundo="' + e_(x.id) + '"' + (bm.busy[x.id] ? ' disabled' : '') + '>Undo</button></span></div>'; }).join('') +
+      '</div></details>';
+  }
+  function dshortX(d) { return window.dshort ? dshort(d) : d; }
+  function fmtX(n) { return window.fmt ? fmt(n) : n; }
   /** Claude judges the lines the rules were unsure about, once, using the invoices, costs, projects and shoots in the app. */
   function bmAsk() {
     var ids = bm.items.filter(function (x) { return x.proposal.strength !== 'strong' && !x.claude && !bm.asked[x.id]; }).slice(0, 12).map(function (x) { return x.id; });
@@ -867,9 +890,9 @@
   function bmPanelHtml() {
     if (!admin()) return '';
     if (bm.err) return '<div class="panel bm-panel"><span class="h2big">Bank matches</span><div class="banner" style="margin:0">Could not work out matches: ' + e_bmErr() + ' <a class="link" data-bmreload tabindex="0">Try again</a></div></div>';
-    if (!bm.loaded) return '<div class="panel bm-panel"><span class="h2big">Bank matches</span><div class="note">Looking at your bank lines…</div></div>';
-    if (!bm.items.length) return '';
-    return '<div class="panel bm-panel"><div class="bm-head"><div><span class="h2big">Bank matches · ' + bm.items.length + '</span><div class="note">Each line from your statements, matched against your invoices, bills, projects and shoots. Nothing is booked until you approve it.</div></div></div>' +
+    if (!bm.loaded) return '<div class="panel bm-panel"><span class="h2big">Bank matches</span>' + (bmAutoHtml() || '<div class="note">Looking at your bank lines…</div>') + '</div>';
+    if (!bm.items.length) return (bm.auto.list || []).length ? '<div class="panel bm-panel"><span class="h2big">Bank matches</span><div class="note">Nothing needs you. Every bank line is sorted.</div>' + bmAutoHtml() + '</div>' : '';
+    return '<div class="panel bm-panel"><div class="bm-head"><div><span class="h2big">Bank matches · ' + bm.items.length + '</span><div class="note">Each line from your statements, matched against your invoices, bills, projects and shoots. Only lines that need you are listed here.</div></div></div>' + bmAutoHtml() +
       (bm.asking ? '<div class="bm-status"><span class="ob-spin bm-spin"></span>Claude is checking ' + bm.asking + ' uncertain line' + (bm.asking === 1 ? '' : 's') + ' against the app…</div>' : '') +
       (bm.askErr ? '<div class="note bm-askerr">Claude could not check the uncertain lines (' + e_(bm.askErr) + '). The rule-based suggestions are shown.</div>' : '') +
       dl('bm-payees', payees()) + '<div class="bm-list">' + bm.items.map(bmCardHtml).join('') + '</div></div>';
@@ -1020,7 +1043,7 @@
     var menu = $('obx-menu');
     if (menu && !menu.hidden && !t.closest('.obx-addwrap')) menu.hidden = true;
     if (t.closest('#obx-modal [data-act]')) closeM();   // e.g. "+ Add cost to this shoot" opens the original cost form
-    var el = t.closest('[data-obx],[data-obxbill],[data-obxrev],[data-obxsplit],[data-obxover],[data-obxmsg],[data-obxfix],[data-obxdis],[data-obxdel],[data-bmgo],[data-bmpick],[data-bmreject],[data-bmignore],[data-bmreload],[data-obxundo]');
+    var el = t.closest('[data-obx],[data-obxbill],[data-obxrev],[data-obxsplit],[data-obxover],[data-obxmsg],[data-obxfix],[data-obxdis],[data-obxdel],[data-bmgo],[data-bmpick],[data-bmreject],[data-bmignore],[data-bmreload],[data-obxundo],[data-bmundo]');
     if (!el) { if (menu && t.closest('#obx-menu [data-act]')) menu.hidden = true; return; }
     ev.stopPropagation(); ev.preventDefault();
     var a = el.getAttribute('data-obx');
@@ -1079,6 +1102,11 @@
     }
     else if (el.hasAttribute('data-bmreject')) { var rid = el.getAttribute('data-bmreject'); bm.open[rid] = !bm.open[rid]; if (bm.open[rid]) { delete bm.edit[rid]; } bmPaint(rid); }
     else if (el.hasAttribute('data-bmignore')) bmIgnore(el.getAttribute('data-bmignore'), el);
+    else if (el.hasAttribute('data-bmundo')) {
+      var uid = el.getAttribute('data-bmundo'); if (bm.busy[uid]) return; bm.busy[uid] = 1; bmPaint();
+      api('obwBankUndo', [uid]).then(function () { delete bm.busy[uid]; toast('Put back on your list', true); bm.loaded = false; if (window.reloadData) reloadData(function () { bmLoad(true); }); else bmLoad(true); },
+        function (e) { delete bm.busy[uid]; toast(e.message); bmPaint(); });
+    }
     else if (el.hasAttribute('data-bmreload')) { bm.err = ''; bm.loaded = false; bmPaint(); bmLoad(true); }
   }, true);
   document.addEventListener('keydown', function (ev) {

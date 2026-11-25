@@ -543,3 +543,13 @@ main.gl-enter .gl-line { animation: gl-draw 900ms cubic-bezier(.23,1,.32,1) both
 .gl-accent .chip::before { content: ""; display: inline-block; width: 10px; height: 10px; border-radius: 50%; margin-right: 8px; vertical-align: -1px; }
 .gl-accent [data-gl-accent="orange"]::before { background: linear-gradient(180deg, #F0996B, #E07A45); }
 .gl-accent [data-gl-accent="pink"]::before { background: linear-gradient(180deg, #FF5FA6, #F0287F); }
+
+/* bank: automatic filing summary */
+.bm-auto { margin: 4px 0 16px; border-radius: 18px; background: rgba(255,255,255,.04); box-shadow: inset 0 0 0 1px rgba(255,255,255,.07); }
+[data-theme="light"] .bm-auto { background: rgba(23,24,27,.035); box-shadow: inset 0 0 0 1px rgba(23,24,27,.07); }
+.bm-auto summary { cursor: pointer; padding: 14px 18px; font-size: 14px; color: var(--muted); list-style: none; }
+.bm-auto summary::-webkit-details-marker { display: none; }
+.bm-auto summary b { color: var(--bone); font-weight: 500; }
+.bm-autolist { max-height: 420px; overflow: auto; padding: 0 18px 10px; }
+.bm-autolist .lrow { gap: 16px; align-items: center; }
+.bm-autolist .r { display: flex; align-items: center; gap: 12px; flex: none; }
