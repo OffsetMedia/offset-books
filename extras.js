@@ -815,7 +815,7 @@
     if (A.running) return '<div class="bm-status"><span class="ob-spin bm-spin"></span>Filing the lines that need no decision (already in your books, bank charges, fixed rules)… ' + A.done + ' so far</div>';
     if (!L.length) return A.err ? '<div class="note bm-askerr">Some lines could not be filed automatically (' + e_(A.err) + '). They are in the list below.</div>' : '';
     var k = { books: 0, rule: 0, invoice: 0 }; L.forEach(function (x) { k[x.kind] = (k[x.kind] || 0) + 1; });
-    var parts = []; if (k.books) parts.push(k.books + ' already in your books'); if (k.invoice) parts.push(k.invoice + ' invoice payment' + (k.invoice === 1 ? '' : 's')); if (k.rule) parts.push(k.rule + ' by your sorting rules');
+    var parts = []; if (k.books) parts.push(k.books + ' already in your books'); if (k.invoice) parts.push(k.invoice + ' invoice payment' + (k.invoice === 1 ? '' : 's')); if (k.rule) parts.push(k.rule + ' by your sorting rules'); if (k.zoho) parts.push(k.zoho + ' for old Zoho invoices');
     return '<details class="bm-auto"><summary><b>' + L.length + ' filed automatically</b> in the last 30 days: ' + parts.join(', ') + '. Open to check or undo.</summary><div class="bm-autolist">' +
       L.map(function (x) { return '<div class="lrow"><span class="l"><span class="d">' + e_(dshortX(x.date)) + '</span><span>' + e_(x.text) + '<small class="note" style="display:block">' + e_(x.why) + '</small></span></span><span class="r"><strong class="num">' + (x.direction === 'credit' ? '+ ' : '- ') + e_(fmtX(x.amount)) + '</strong> <button type="button" class="chip" data-bmundo="' + e_(x.id) + '"' + (bm.busy[x.id] ? ' disabled' : '') + '>Undo</button></span></div>'; }).join('') +
       '</div></details>';

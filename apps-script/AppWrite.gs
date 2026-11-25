@@ -1232,6 +1232,7 @@ function obwBankCompute_() {
   };
   var usedByOthers = {};      // entry ids already linked to a bank line
   entries.forEach(function (e) { if (e.bank_line_id) usedByOthers[e.id] = e.bank_line_id; });
+  var zoho = obwTryTable_('Invoices').filter(function (i) { return i.number && obwLegacyInv_(i) && i.status === 'paid'; });
   var clientToks = clients.map(function (c) { return { name: c.name, t: obwToks_(c.name) }; });
   function clientsNamed(txt) { var tt = obwToks_(txt); return clientToks.filter(function (c) { return obwShare_(tt, c.t).length; }).map(function (c) { return c.name; }); }
   var rules = (typeof loadRules_ === 'function') ? loadRules_() : [], ctx = null;
@@ -1240,7 +1241,7 @@ function obwBankCompute_() {
 
   apps.forEach(function (a) {
     var amt = Math.abs(obwNum_(a.amount)), date = String(a.date || '').slice(0, 10), text = String(a.suggestion || a.description || '');
-    var credit = a.kind !== 'cost', trusted = (a.source === 'rule' || a.source === 'manual') ? String(a.payee || '') : '';
+    var credit = a.kind !== 'cost', trusted = ((a.source === 'rule' && String(a.rule || '').trim()) || a.source === 'manual') ? String(a.payee || '') : '';
     // Only the bank's own text (and a payee set by a rule or a person) can say who this is. An AI guess must never count as "same client".
     var toks = obwToks_(text + ' ' + trusted), named = clientsNamed(text);
     var it = { id: a.id, bank_line: a.bank_line, date: date, amount: amt, direction: credit ? 'credit' : 'debit', text: text.slice(0, 160),
@@ -1249,6 +1250,7 @@ function obwBankCompute_() {
 
     if (credit) {
       invoices.forEach(function (i) {
+        if (i.date && date && obwDays_(date, String(i.date).slice(0, 10)) > 7) return; // invoice written after this money arrived
         var bal = obwInvBal_(i), due = obwInvDue_(i), sc = 0, why = [], conflict = '';
         var num = String(i.number), digits = num.replace(/\D/g, '');
         if (digits.length >= 6 && text.indexOf(digits) !== -1) { sc += 60; why.push('the invoice number is in the bank text'); }
@@ -1332,6 +1334,16 @@ function obwBankCompute_() {
     if (it.conflict && p.strength !== 'strong') { p.strength = 'conflict'; p.why += ' ' + it.conflict + '.'; }
     if (cands.length > 1 && !strong && cands[0].score >= 60 && cands[1].score >= 60) { p.strength = 'conflict'; p.why += ' Two records fit about equally well.'; }
     it.proposal = p;
+    if (credit) {
+      it.zoho = zoho.filter(function (i) {
+        var d = String(i.date || '').slice(0, 10), digits = String(i.number).replace(/\D/g, '');
+        if (d && date && obwDays_(date, d) > 7) return false;
+        var byNo = digits.length >= 6 && text.replace(/\D/g, '').indexOf(digits) !== -1;
+        var amtOk = Math.abs(obwInvDue_(i) - amt) < 0.5 || Math.abs(obwNum_(i.total) - amt) < 0.5;
+        var who = obwShare_(obwToks_(text), obwToks_(i.client)).length || obwAliasInText_(i.client, text, alias);
+        return byNo || (amtOk && who);
+      }).map(function (i) { return i.number; });
+    }
     it.auto = /automatic filing undone/.test(String(a.reason || '')) ? null : obwAutoPick_(it, a, credit, text, toks, entries, usedByOthers, alias, rules, function () { return ctx || (ctx = (typeof sortContext_ === 'function') ? sortContext_() : null); });
     out.items.push(it);
   });
@@ -1344,6 +1356,8 @@ function obwBankCompute_() {
  */
 function obwAutoPick_(it, a, credit, text, toks, entries, usedByOthers, alias, rules, getCtx) {
   var amt = it.amount, date = it.date;
+  if (credit && it.zoho && it.zoho.length === 1 && !(it.invoices[0] && it.invoices[0].score >= 80))
+    return { kind: 'zoho', mode: 'zoho', ref: it.zoho[0], why: 'Payment for ' + it.zoho[0] + ', paid in Zoho before the app\'s books start: nothing new to book' };
   if (!credit) {
     var near = it.entries.filter(function (x) { return x.type === 'entry' && !x.blocked && x.gap >= -7 && x.gap <= 45; });
     var namedNear = near.filter(function (x) { return x.named; });
@@ -1391,8 +1405,9 @@ function obwBankAuto_(user, args) {
     var it = todo[i], au = it.auto, before = {};
     String(au.ref || '').split(',').forEach(function (eid) { var e = byId[eid]; if (e) before[eid] = { paid_status: e.paid_status, paid_amount: e.paid_amount, paid_date: e.paid_date, payment_method: e.payment_method, bank_line_id: e.bank_line_id }; });
     try {
-      var c = au.c || {}; c.mode = au.mode; c.ref = au.ref;
-      var res = obwBankApply_(user, [it.id, c]);
+      var c = au.c || {}, res; c.mode = au.mode; c.ref = au.ref;
+      if (au.mode === 'zoho') { obwAsUser_(user, function () { return rejectItem(it.id, 'Paid on ' + au.ref + ' (Zoho, before the app\'s books)'); }); res = { ref: au.ref }; }
+      else res = obwBankApply_(user, [it.id, c]);
       var t = obwTable_('Approvals'); obwEnsureCols_(t, ['reason']); t = obwTable_('Approvals');
       var row = t.rows.filter(function (x) { return String(x.id) === String(it.id); })[0];
       if (row) obwWriteCells_(t, row._row, { decided_by: 'auto: ' + user.email, reason: JSON.stringify({ auto: au.kind, why: au.why, mode: au.mode, ref: res.ref, before: before }) }, ['decided_by', 'reason']);
@@ -1406,10 +1421,12 @@ function obwBankAuto_(user, args) {
 function obwBankUndo_(user, args) {
   obwRequireAdmin_(user);
   var id = String(args[0] || ''), t = obwTable_('Approvals'), a = t.rows.filter(function (x) { return String(x.id) === id; })[0];
-  if (!a || a.status !== 'approved' || String(a.decided_by || '').indexOf('auto') !== 0) throw obwErr_('Only lines that were filed automatically can be undone here.');
+  if (!a || (a.status !== 'approved' && a.status !== 'rejected') || String(a.decided_by || '').indexOf('auto') !== 0) throw obwErr_('Only lines that were filed automatically can be undone here.');
   var info = {}; try { info = JSON.parse(a.reason || '{}'); } catch (x) { /* old row */ }
   obwAssertOpen_(String(a.date).slice(0, 10));
-  if (info.mode === 'new' || info.mode === 'income') {
+  if (info.mode === 'zoho') {
+    /* nothing was booked: only the line goes back */
+  } else if (info.mode === 'new' || info.mode === 'income') {
     obwDeleteEntry_(user, [info.ref, 'Undo automatic filing of bank line ' + a.bank_line]);
   } else if (info.mode === 'invoice') {
     var inv = obwTryTable_('Invoices').filter(function (i) { return String(i.number) === String(info.ref); })[0], pays = [];
@@ -1433,7 +1450,7 @@ function obwBankUndo_(user, args) {
   try {
     t = obwTable_('Approvals'); var cur = t.rows.filter(function (x) { return String(x.id) === id; })[0];
     obwWriteCells_(t, cur._row, { status: 'pending', decided_by: '', decided_at: '', entry_id: '', reason: 'kept for review (automatic filing undone)' }, ['status', 'decided_by', 'decided_at', 'entry_id', 'reason']);
-    obwAudit_(user, 'Approvals', id, 'status', 'approved', 'pending', 'Automatic filing undone');
+    obwAudit_(user, 'Approvals', id, 'status', a.status, 'pending', 'Automatic filing undone');
     var bt = obwTryTableObj_('BankLines'), bl = bt && bt.rows.filter(function (x) { return String(x.id) === String(a.bank_line); })[0];
     if (bl) obwWriteCells_(bt, bl._row, { status: 'queued', matched_entry: '' }, ['status', 'matched_entry']);
   } finally { lock2.releaseLock(); }
@@ -1470,7 +1487,7 @@ function obwBankSuggest_(user) {
   });
   // what was filed automatically in the last 30 days, newest first, so each can be checked or undone
   var since = Utilities.formatDate(new Date(Date.now() - 30 * 86400000), 'Asia/Colombo', 'yyyy-MM-dd');
-  r.autoDone = obwTryTable_('Approvals').filter(function (a) { return a.status === 'approved' && String(a.decided_by || '').indexOf('auto') === 0 && String(a.decided_at || '').slice(0, 10) >= since; })
+  r.autoDone = obwTryTable_('Approvals').filter(function (a) { return (a.status === 'approved' || a.status === 'rejected') && String(a.decided_by || '').indexOf('auto') === 0 && String(a.decided_at || '').slice(0, 10) >= since; })
     .map(function (a) { var info = {}; try { info = JSON.parse(a.reason || '{}'); } catch (x) { /* */ }
       return { id: a.id, date: String(a.date).slice(0, 10), amount: Math.abs(obwNum_(a.amount)), direction: a.kind === 'cost' ? 'debit' : 'credit', text: String(a.suggestion || a.description || '').slice(0, 90), why: info.why || '', kind: info.auto || 'books' }; })
     .sort(function (x, y) { return y.date.localeCompare(x.date); }).slice(0, 400);
