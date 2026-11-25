@@ -553,3 +553,11 @@ main.gl-enter .gl-line { animation: gl-draw 900ms cubic-bezier(.23,1,.32,1) both
 .bm-autolist { max-height: 420px; overflow: auto; padding: 0 18px 10px; }
 .bm-autolist .lrow { gap: 16px; align-items: center; }
 .bm-autolist .r { display: flex; align-items: center; gap: 12px; flex: none; }
+
+/* calendar page */
+.pev.cal-pj { display: block; width: 100%; text-align: left; border: 0; cursor: pointer; font: inherit; font-size: 11.5px; color: var(--bone);
+  background: rgba(var(--accent-rgb), .16); border-left: 3px solid var(--accent) !important; border-radius: 6px; padding: 3px 6px; margin-top: 3px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; transition: background 160ms ease; }
+.pev.cal-pj:hover, .pev.cal-pj.on { background: rgba(var(--accent-rgb), .32); }
+.cal-dot { background: var(--accent) !important; }
+.cal-panel { margin-top: 20px; }
+.cal-panel .ptitle { display: flex; align-items: center; justify-content: space-between; gap: 16px; }

@@ -20,7 +20,7 @@
     bell: '<svg viewBox="0 0 24 24" width="19" height="19" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M6 16V11a6 6 0 1 1 12 0v5l1.5 2h-15z"/><path d="M10 20a2 2 0 0 0 4 0"/></svg>',
     sun: '<svg viewBox="0 0 24 24" width="18" height="18" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" aria-hidden="true"><circle cx="12" cy="12" r="4"/><path d="M12 2.5v2M12 19.5v2M2.5 12h2M19.5 12h2M5.3 5.3l1.4 1.4M17.3 17.3l1.4 1.4M5.3 18.7l1.4-1.4M17.3 6.7l1.4-1.4"/></svg>'
   };
-  var LABEL = { dashboard: 'Dashboard', inbox: 'Inbox', projects: 'Projects', project: 'Projects', entries: 'Entries', vendors: 'Vendors', bank: 'Bank', pay: 'Payments', docs: 'Invoices', doc: 'Invoices', edit: 'Invoices', clients: 'Clients', crew: 'Crew', settings: 'Settings', books: 'Books', acct: 'Accounts', more: 'More' };
+  var LABEL = { cal: 'Calendar', over: 'Overheads', dashboard: 'Dashboard', inbox: 'Inbox', projects: 'Projects', project: 'Projects', entries: 'Entries', vendors: 'Vendors', bank: 'Bank', pay: 'Payments', docs: 'Invoices', doc: 'Invoices', edit: 'Invoices', clients: 'Clients', crew: 'Crew', settings: 'Settings', books: 'Books', acct: 'Accounts', more: 'More' };
   function view() { return doc.body.getAttribute('data-obview') || (window.state && state.view) || 'dashboard'; }
 
   /* ---------- sliding pills ---------- */

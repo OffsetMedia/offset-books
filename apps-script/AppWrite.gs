@@ -1232,6 +1232,7 @@ function obwBankCompute_() {
   };
   var usedByOthers = {};      // entry ids already linked to a bank line
   entries.forEach(function (e) { if (e.bank_line_id) usedByOthers[e.id] = e.bank_line_id; });
+  obwAutoPick_.ctx = null;
   var zoho = obwTryTable_('Invoices').filter(function (i) { return i.number && obwLegacyInv_(i) && i.status === 'paid'; });
   var clientToks = clients.map(function (c) { return { name: c.name, t: obwToks_(c.name) }; });
   function clientsNamed(txt) { var tt = obwToks_(txt); return clientToks.filter(function (c) { return obwShare_(tt, c.t).length; }).map(function (c) { return c.name; }); }
@@ -1355,6 +1356,7 @@ function obwBankCompute_() {
  * (bank charges, PickMe, Uber, Zoho...). Returns { mode, ref, c, why, kind } or null. Only certain cases qualify.
  */
 function obwAutoPick_(it, a, credit, text, toks, entries, usedByOthers, alias, rules, getCtx) {
+  function refCtx() { return obwAutoPick_.ctx || (obwAutoPick_.ctx = { projects: obwTryTable_('Projects').filter(function (p) { return p.id; }), payees: Object.keys(entries.reduce(function (o, e) { if (e.payee) o[e.payee] = 1; return o; }, {})) }); }
   var amt = it.amount, date = it.date;
   if (credit && it.zoho && it.zoho.length === 1 && !(it.invoices[0] && it.invoices[0].score >= 80))
     return { kind: 'zoho', mode: 'zoho', ref: it.zoho[0], why: 'Payment for ' + it.zoho[0] + ', paid in Zoho before the app\'s books start: nothing new to book' };
@@ -1382,6 +1384,12 @@ function obwAutoPick_(it, a, credit, text, toks, entries, usedByOthers, alias, r
     });
     if (inc.length === 1) return { kind: 'books', mode: 'link', ref: inc[0].id, why: 'Already in your books as ' + inc[0].id + ' (' + inc[0].payee + ')' };
   }
+  // Offset Media payment reference typed when paying (CR_SHALLUM_P014 ...): the most reliable signal there is
+  if (!credit) {
+    var rp = obwRefParse_(text, refCtx().projects, refCtx().payees, alias);
+    if (rp && rp.ok) return { kind: 'ref', mode: 'new', ref: '', why: 'Payment reference ' + String(text).split('/')[0].replace(/\s+/g, '') + ': ' + rp.description + (rp.project ? ' (' + rp.project + ')' : ''),
+      c: { payee: rp.payee, cost_type: rp.cost_type, account: rp.account, business_line: '', project: rp.project, description: rp.description, doc: rp.doc } };
+  }
   // fixed sorting rules (never guesses): only when the rule settles everything, including the project
   if (rules.length && typeof findRule_ === 'function' && typeof proposalFromRule_ === 'function') {
     var line = { id: a.bank_line, date: date, description: text, amount: credit ? amt : -amt };
@@ -1393,6 +1401,42 @@ function obwAutoPick_(it, a, credit, text, toks, entries, usedByOthers, alias, r
     }
   }
   return null;
+}
+
+/**
+ * Offset Media's payment reference: TYPE_WHO_PROJECT[_Dn], e.g. CR_SHALLUM_P014, RN_TG_P014, DS_NOV, AH_NOV, PC_OFFICE.
+ * Also the older codes already in use (DIR_SAL, SALAHRON / AHRONSAL / PROFESSIONAL_FEE_AHRON, PETTYCASH).
+ * Returns { payee, cost_type, account, project, description, doc, ok } or null. ok is false when a project number is given but not found.
+ */
+var OBW_REF_TYPES_ = {
+  CR: ['Crew / freelancer', '', 'Crew'], RN: ['Equipment rental', '', 'Equipment rental'], LC: ['Location & venue', '', 'Location'], PR: ['Other', '', 'Props'],
+  TR: ['Transport', '', 'Transport'], FD: ['Food', '', 'Food'], SW: ['Other', '6030', 'Software / subscription'], BL: ['Other', '6040', 'Office bill'],
+  AH: ['Crew / freelancer', '6020', 'Ahron monthly fee', 'Triple A Production'], DS: ['Staff & salaries', '6010', 'Director salary', 'Joshua (director salary)'],
+  DL: ['Other', '1400', 'Director loan', 'Joshua (director loan)'], PC: ['Other', '', 'Petty cash', 'Petty cash']
+};
+function obwRefParse_(text, projects, payees, alias) {
+  var head = String(text || '').toUpperCase().replace(/\s+/g, '').split('/')[0];
+  var m = /^(CR|RN|LC|PR|TR|FD|SW|BL|AH|DS|DL|PC)_([A-Z0-9&.-]+)?(?:_(P\d{2,4}|OFFICE))?(?:_D(\d{1,2}))?$/.exec(head);
+  if (!m) {
+    if (/^DIR_?SAL/.test(head)) m = [head, 'DS', '', '', ''];
+    else if (/^(SAL_?AHRON|AHRON_?SAL|PROFESSIONAL_?FEE_?AHRON)/.test(head)) m = [head, 'AH', '', '', ''];
+    else if (/^PETTY_?CASH/.test(head)) m = [head, 'PC', '', '', ''];
+    else return null;
+  }
+  var t = OBW_REF_TYPES_[m[1]], who = m[2] || '', proj = m[3] || '', day = m[4] || '';
+  // WHO may be a month (DS_NOV) or a project (FD_P014) rather than a person
+  if (/^P\d{2,4}$/.test(who) && !proj) { proj = who; who = ''; }
+  var month = /^(JAN|FEB|MAR|APR|MAY|JUN|JUL|AUG|SEP|OCT|NOV|DEC)$/.test(who);
+  var project = '', ok = true;
+  if (proj && proj !== 'OFFICE') { var hit = projects.filter(function (p) { return String(p.id).toUpperCase() === proj; })[0]; if (hit) project = hit.id; else ok = false; }
+  var payee = t[3] || '';
+  if (!payee && who && !month) {
+    var known = payees.filter(function (n) { return obwParty_(n, who, alias) === 2 || obwNameKey_(n).replace(/ /g, '') === who.toLowerCase(); })[0];
+    payee = known || (who.charAt(0) + who.slice(1).toLowerCase());
+  }
+  if (!payee) payee = t[2];
+  var desc = t[2] + (month ? ' ' + who.charAt(0) + who.slice(1).toLowerCase() : '') + (day ? ', day ' + Number(day) : '');
+  return { payee: payee, cost_type: t[0], account: t[1], project: project, description: desc, doc: 'bank line only', ok: ok, code: m[1] };
 }
 
 /** Files up to 25 lines that need no decision. The screen calls it again until nothing is left. Every one can be undone. */
@@ -1508,6 +1552,7 @@ function obwParseArr_(text) {
 function obwBankAsk_(user, args) {
   obwRequireAdmin_(user);
   var settings = obwSettings_(), budget = Number(settings.claude_monthly_budget_usd) || 4;
+  if (String(settings.claude_off || '').toLowerCase() === 'yes') return { asked: 0, results: {}, off: true };
   if (obwMonthSpend_() >= budget) throw obwErr_('This month\'s Claude budget (USD ' + budget + ') is used up. Raise claude_monthly_budget_usd in Settings.');
   var want = {}; (args[0] || []).slice(0, 12).forEach(function (id) { want[String(id)] = 1; });
   var comp = obwBankCompute_(), items = comp.items.filter(function (i) { return want[i.id]; });
@@ -1541,9 +1586,8 @@ function obwBankAsk_(user, args) {
     obwParseArr_(obwCallClaude_(model, system, (hint ? hint + '\n\n' : '') + payload, 'bank matching')).forEach(function (o) { if (o && o.id) map[String(o.id)] = o; });
   }
   var ids = items.map(function (i) { return i.id; });
-  ask(fast, ids, '');
-  var unsure = ids.filter(function (id) { var o = map[id]; return !o || o.confidence === 'low' || o.action === 'unsure'; });
-  if (unsure.length && obwMonthSpend_() < budget) { try { ask(strong, unsure, 'A faster model was unsure about these lines. Think carefully and give your best answer for each.'); } catch (x) { /* keep the first answers */ } }
+  // Rules and the automatic filing already took every clear line, so only odd ones reach Claude: go straight to the stronger model, once.
+  ask(strong, ids, 'These lines did not match any rule or record. Think carefully and give your best answer for each.');
 
   var invSet = {}; invoices.forEach(function (i) { invSet[i.number] = i; });
   var entSet = {}; entries.forEach(function (e) { entSet[e.id] = e; });

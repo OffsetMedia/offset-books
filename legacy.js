@@ -91,8 +91,10 @@ var NAV = [
   {id:'dashboard',label:'Dashboard',short:'Home',roles:['admin','viewer','accountant']},
   {id:'inbox',label:'Inbox',roles:['admin'],deskonly:1},
   {id:'projects',label:'Projects',roles:['admin','viewer','accountant']},
-  {id:'entries',label:'Entries',roles:['admin','viewer','accountant']},
-  {sec:1,id:'vendors',label:'Vendors',roles:['admin','accountant']},
+  {id:'entries',label:'Entries',roles:['admin','accountant']},
+  {sec:1,id:'cal',label:'Calendar',roles:['admin','viewer','accountant']},
+  {sec:1,id:'over',label:'Overheads',roles:['admin','accountant']},
+  {sec:1,id:'vendors',label:'Vendors',roles:['admin','viewer','accountant']},
   {sec:1,id:'bank',label:'Bank',roles:['admin']},
   {sec:1,id:'pay',label:'Payments',roles:['admin','viewer','accountant']},
   {id:'docs',label:'Invoices',roles:['admin','viewer','accountant']},
@@ -115,7 +117,7 @@ function renderNav(){
 }
 function go(v){
   state.view=v; renderNav();
-  var f={inbox:OBX.vInbox,more:OBX.vMore,dashboard:vDashboard,books:vBooks,projects:vProjects,project:vProject,entries:vEntries,bank:vBank,acct:vAcct,pay:vPay,vendors:vVendors,docs:vDocs,doc:vDoc,edit:vEdit,clients:vClients,crew:vCrew,settings:vSettings}[v];
+  var f={inbox:OBX.vInbox,more:OBX.vMore,dashboard:vDashboard,books:vBooks,projects:vProjects,project:vProject,entries:vEntries,bank:vBank,acct:vAcct,pay:vPay,cal:vCal,over:vOver,vendors:vVendors,docs:vDocs,doc:vDoc,edit:vEdit,clients:vClients,crew:vCrew,settings:vSettings}[v];
   document.getElementById('main').innerHTML='<div class="phone-logo"><span class="w">OFFSET</span></div>'+f();
   OBX.afterGo(v);
   window.scrollTo(0,0);
@@ -852,6 +854,7 @@ function doAct(act,el){
       var m=state.modal;
       if(!/^[^@\s,;]+@[^@\s,;]+\.[^@\s,;]+$/.test(String(m.to||'').trim())){toast('Enter a valid email address.');return;}
       call('sendDoc',[m.type,m.no,{email:true,to:String(m.to).trim(),cc:m.cc,subject:m.subject,body:m.body,saveEmail:!!m.save}],function(){closeModal();go('doc');},'Sent to '+String(m.to).trim()); break;
+    case 'bk-stop': if(state.sort){state.sort.stop=true;go('bank');} break;
     case 'pay':
       if(!d) return;
       openModal({kind:'pay',no:no,balance:invBal(d),date:TODAY,amount:String(invBal(d)),method:'Bank transfer'}); break;
@@ -1292,6 +1295,7 @@ function runSort(id){
       if(r.paired){s.reversed+=r.paired.reversed;s.adjusted+=r.paired.adjusted;}
       if(r.error){s.running=false;s.err=r.error;}
       else if(r.paused){s.running=false;s.err='Paused: this month\'s Claude budget is used up. Raise claude_monthly_budget_usd in the Settings tab to continue.';}
+      else if(s.stop){s.running=false;s.err='Stopped. The lines not sorted yet are kept: press Continue sorting when you want.';}
       else if(r.remaining>0&&r.processed>0){if(state.view==='bank') go('bank');step();return;}
       else if(r.remaining>0){s.running=false;s.err='Some lines could not be sorted. Press Continue to try again.';}
       else {s.running=false;s.done=true;}
@@ -1313,7 +1317,7 @@ function vBank(){
   var up='';
   var stm=state.stm;
   if(s&&s.running){
-    up='<div class="panel"><span class="h2big">Sorting…</span><div class="note">'+s.queued+' lines queued so far'+(s.remaining!=null?', '+s.remaining+' still to do':'')+'. Keep this page open. Claude is only asked about lines the rules cannot place.</div><div class="bar"><i style="width:'+(s.remaining!=null&&s.queued+s.remaining>0?Math.round(s.queued/(s.queued+s.remaining)*100):5)+'%"></i></div></div>';
+    up='<div class="panel"><span class="h2big">Sorting…</span><div class="note">'+s.queued+' lines queued so far'+(s.remaining!=null?', '+s.remaining+' still to do':'')+'. Keep this page open. Claude is only asked about lines the rules cannot place.</div><div class="btnrow"><button class="btn" data-act="bk-stop"'+(s.stop?' disabled':'')+'>'+(s.stop?'Stopping after this step…':'Stop')+'</button></div><div class="bar"><i style="width:'+(s.remaining!=null&&s.queued+s.remaining>0?Math.round(s.queued/(s.queued+s.remaining)*100):5)+'%"></i></div></div>';
   } else if(s&&(s.done||s.err)){
     up='<div class="panel"><span class="h2big">'+(s.done?'Sorting finished':'Sorting stopped')+'</span><div class="note">'+s.queued+' lines are waiting in Approvals'+(s.reversed?'. '+s.reversed+' reversals were paired with their purchases and cancelled out':'')+(s.adjusted?'. '+s.adjusted+' bank refunds were netted against their rides':'')+'. Nothing is in the books until you approve it.</div>'+
       (s.err?'<div class="banner" style="margin:6px 0 0">'+esc(s.err)+'</div>':'')+
@@ -1582,6 +1586,97 @@ function recBody(m){
 }
 
 /* ----- Payments calendar ----- */
+/* ---------- calendar: bills, tax dates, invoices due, and project days (click a project) ---------- */
+var CAL_SUGGEST=[['Google Workspace',17400,1],['SLT Mobitel internet',10000,9],['Claude subscription',6900,23],['Ahron monthly fee',70000,25]];
+function projDays(ym){
+  var out={}, y=+ym.slice(0,4), mth=+ym.slice(5,7), dim=new Date(y,mth,0).getDate();
+  function add(day,o){(out[day]=out[day]||[]).push(o);}
+  var seen={};
+  (OBX.shootList?OBX.shootList():[]).forEach(function(s){
+    var d=String(s.date||'').slice(0,10); if(d.slice(0,7)!==ym||!s.project) return;
+    var p=(DATA.projects||[]).filter(function(x){return x.id===s.project;})[0]; if(!p) return;
+    seen[s.project+'|'+d]=1; add(+d.slice(8,10),{pid:p.id,date:d,t:p.name+(s.name&&s.name!==p.name?' · '+s.name:''),shoot:s.name||''});
+  });
+  (DATA.projects||[]).forEach(function(p){
+    var a=String(p.start||'').slice(0,10), b=String(p.end||p.start||'').slice(0,10); if(!a) return;
+    if(['Cancelled'].indexOf(p.status)>=0) return;
+    for(var d=1;d<=dim;d++){var iso=ym+'-'+pad(d); if(iso>=a&&iso<=b&&!seen[p.id+'|'+iso]) add(d,{pid:p.id,date:iso,t:p.name});}
+  });
+  return out;
+}
+function vCal(){
+  var ym=state.cmonth||TODAY.slice(0,7), y=+ym.slice(0,4), mth=+ym.slice(5,7), dim=new Date(y,mth,0).getDate(), first=(new Date(y,mth-1,1).getDay()+6)%7;
+  var ev=ROLE==='viewer'?{}:payEvents(ym), pj=projDays(ym), sel=state.calSel, cells='', i, d;
+  for(i=0;i<first;i++) cells+='<div class="pcell off"></div>';
+  for(d=1;d<=dim;d++){
+    var iso=ym+'-'+pad(d), list=ev[d]||[], pl=pj[d]||[];
+    cells+='<div class="pcell'+(iso===TODAY?' today':'')+'"><span class="pd">'+d+'</span>'+
+      pl.map(function(o){var on=sel&&sel.pid===o.pid;return '<button type="button" class="pev cal-pj'+(on?' on':'')+'" data-calpid="'+esc(o.pid)+'" data-caldate="'+esc(o.date)+'" title="'+esc(o.t)+'">'+esc(o.t)+'</button>';}).join('')+
+      list.map(function(o){return '<span class="pev" style="border-left-color:'+esc(o.c)+'" title="'+esc(o.t)+'">'+esc(o.t)+'</span>';}).join('')+'</div>';
+  }
+  var prev=(mth===1?(y-1)+'-12':y+'-'+pad(mth-1)), next=(mth===12?(y+1)+'-01':y+'-'+pad(mth+1));
+  var panel='';
+  if(sel){
+    var p=(DATA.projects||[]).filter(function(x){return x.id===sel.pid;})[0];
+    if(p){
+      var inv=(DATA.invoices||[]).filter(function(x){return x.project===p.id&&x.status!=='draft';}), qts=(DATA.quotes||[]).filter(function(x){return x.project===p.id;});
+      var day=(OBX.shootList?OBX.shootList():[]).filter(function(s){return s.project===p.id&&String(s.date).slice(0,10)===sel.date;});
+      function docRow(t,x){return '<tr data-doc="'+t+'|'+esc(x.number)+'" class="click"><td><b>'+esc(x.number)+'</b><small class="note" style="display:block">'+esc(x.subject||'')+'</small></td><td>'+esc(x.status||'')+'</td><td class="r num">'+fmt(x.total)+'</td></tr>';}
+      var dayInv=day.map(function(s){return s.invoice_no;}).filter(Boolean);
+      panel='<div class="panel cal-panel"><div class="ptitle"><span class="h2big">'+esc(p.name)+'</span><button class="btn primary" data-calopen="'+esc(p.id)+'">Open project</button></div>'+
+        '<p class="note">'+esc(p.client||'')+' · '+esc(p.id)+' · '+dshort(sel.date)+(day.length?' · '+esc(day.map(function(s){return s.name;}).join(', ')):'')+(dayInv.length?' · this day is billed on '+esc(dayInv.join(', ')):'')+'</p>'+
+        '<div class="tablewrap"><table class="etbl"><thead><tr><th>Invoice or quote</th><th>Status</th><th class="r">Total</th></tr></thead><tbody>'+
+        (inv.map(function(x){return docRow('invoice',x);}).join('')+qts.map(function(x){return docRow('quote',x);}).join('')||'<tr><td colspan="3" class="empty">No invoices or quotes on this project yet.</td></tr>')+'</tbody></table></div></div>';
+    }
+  }
+  var have={}; (DATA.recurring||[]).forEach(function(r){have[String(r.name).toLowerCase()]=1;});
+  var sug=ROLE==='admin'?CAL_SUGGEST.filter(function(r){return !have[r[0].toLowerCase()];}):[];
+  var sugHtml=sug.length?'<div class="panel"><span class="h2big">Monthly bills seen on your bank statement</span><p class="note">Add them so they show on the calendar. You can change the amount or day after.</p>'+sug.map(function(r){return '<div class="lrow"><span class="l"><b>'+esc(r[0])+'</b> <span class="note">about '+fmt(r[1])+' · day '+r[2]+'</span></span><span class="r"><button class="chip" data-calbill="'+esc(r.join('|'))+'">Add</button></span></div>';}).join('')+'</div>':'';
+  return '<div class="head"><div><span class="mono">Bills, tax dates and project days</span><h1>Calendar</h1></div></div>'+
+    '<div class="filters"><button class="chip" data-cm="'+prev+'">‹ '+esc(monthLabel(prev))+'</button><b style="padding:0 8px">'+esc(monthLabel(ym))+'</b><button class="chip" data-cm="'+next+'">'+esc(monthLabel(next))+' ›</button><button class="chip" data-cm="'+TODAY.slice(0,7)+'">Today</button></div>'+
+    '<div class="pgrid">'+['Mon','Tue','Wed','Thu','Fri','Sat','Sun'].map(function(n){return '<div class="phd">'+n+'</div>';}).join('')+cells+'</div>'+
+    '<p class="note" style="margin-top:8px"><span class="dot cal-dot"></span> project days: click one to see its invoices and quotes'+(ROLE==='viewer'?'':' &nbsp; <span class="dot" style="background:#E8A33D"></span> tax dates &nbsp; <span class="dot" style="background:#2FBF8F"></span> invoices due from clients')+'</p>'+panel+sugHtml;
+}
+
+/* ---------- overheads: company costs not tied to a project, by month ---------- */
+function ohGroup(e){
+  var a=String(e.account), t=String(e.cost_type||''), who=String(e.payee||'').toLowerCase();
+  if(a==='1400') return 'Director loans';
+  if(a==='6010'||(t==='Staff & salaries'&&/josh|director/.test(who))) return 'Director salary';
+  if(/ahron|triple a/.test(who)) return "Ahron's fee";
+  if(a==='6030') return 'Software and subscriptions';
+  if(a==='6040') return 'Internet, phone and office bills';
+  if(a==='7010') return 'Bank charges';
+  if(t==='Transport') return 'Transport';
+  if(t==='Food') return 'Food';
+  if(a==='6020'||t==='Crew / freelancer'||t==='Staff & salaries') return 'Other staff and freelancers';
+  return 'Other overheads';
+}
+var OH_ORDER=[['People',["Director salary","Ahron's fee",'Other staff and freelancers']],['Software and bills',['Software and subscriptions','Internet, phone and office bills','Bank charges']],['Day to day',['Transport','Food','Other overheads']],['Not a cost (shown for reference)',['Director loans']]];
+function vOver(){
+  var ms=fyMonths(), sums={}, tot={};
+  (DATA.entries||[]).forEach(function(e){
+    if(e.kind!=='cost') return; if(e.project&&String(e.account)!=='1400') return;
+    var m=String(e.date).slice(0,7); if(ms.indexOf(m)<0) return;
+    var g=ohGroup(e), v=num(e.amount); sums[g+'|'+m]=(sums[g+'|'+m]||0)+v; tot[g]=(tot[g]||0)+v;
+  });
+  var colTot=ms.map(function(){return 0;}), grand=0;
+  var body=OH_ORDER.map(function(sec){
+    var rows=sec[1].map(function(g){
+      var vals=ms.map(function(m,i){var v=sums[g+'|'+m]||0; if(g!=='Director loans'){colTot[i]+=v;} return v;}), t=tot[g]||0; if(g!=='Director loans') grand+=t;
+      return '<tr><td class="name">'+esc(g)+'</td>'+vals.map(function(v){return '<td class="r num">'+(v?fmt(v):'<span class="note">-</span>')+'</td>';}).join('')+'<td class="r num"><b>'+(t?fmt(t):'-')+'</b></td></tr>';
+    }).join('');
+    return '<tr class="group"><td colspan="'+(ms.length+2)+'">'+esc(sec[0])+'</td></tr>'+rows;
+  }).join('');
+  var foot='<tr class="total"><td>Total overheads</td>'+colTot.map(function(v){return '<td class="r num">'+(v?fmt(v):'-')+'</td>';}).join('')+'<td class="r num"><b>'+fmt(grand)+'</b></td></tr>';
+  var cards=[["Director salary",tot["Director salary"]||0],["Ahron's fee",tot["Ahron's fee"]||0],['Software and subscriptions',tot['Software and subscriptions']||0]];
+  return '<div class="head"><div><span class="mono">Company costs not tied to a project · FY '+esc(ms[0].slice(0,4))+'/'+esc(String(+ms[0].slice(0,4)+1).slice(2))+' · LKR</span><h1>Overheads</h1></div></div>'+
+    '<div class="cards"><div class="card hero"><div class="mono">Total overheads this year</div><div class="big">'+fmt(grand)+'</div><div class="sub">director loans not included</div></div>'+
+    cards.map(function(c){return '<div class="card"><div class="mono">'+esc(c[0])+'</div><div class="big">'+fmt(c[1])+'</div></div>';}).join('')+'</div>'+
+    '<div class="tablewrap sticky1"><table class="etbl"><thead><tr><th>Overhead</th>'+ms.map(function(m){return '<th class="r">'+esc(monthLabel(m).split(' ')[0])+'</th>';}).join('')+'<th class="r">Total</th></tr></thead><tbody>'+body+foot+'</tbody></table></div>'+
+    '<p class="note">Overheads are costs with no project. Director loans are money lent to or from you, not a cost, so they are listed but not added in.</p>';
+}
+
 function payEvents(ym){
   var ev={}, y=+ym.slice(0,4), mth=+ym.slice(5,7), dim=new Date(y,mth,0).getDate();
   function add(day,o){(ev[day]=ev[day]||[]).push(o);}
@@ -1610,9 +1705,7 @@ function vPay(){
   var uTot=0, urows=unpaid.slice(0,30).map(function(e){var o=num(e.amount)-paidOf(e);return '<tr><td>'+dshort(e.date)+'</td><td class="name"><b>'+esc(e.payee)+'</b><small>'+esc(e.description||'')+'</small></td><td class="r num amt">'+fmt(o)+'</td></tr>';}).join('');
   unpaid.forEach(function(e){uTot+=num(e.amount)-paidOf(e);});
   return '<div class="head"><div><span class="mono">Money going out and coming in</span><h1>Payments</h1></div></div>'+spendPanel(false)+'<div style="height:14px"></div>'+
-    '<div class="filters"><button class="chip" data-pm="'+prev+'">‹ '+esc(monthLabel(prev))+'</button><b style="padding:0 8px">'+esc(monthLabel(ym))+'</b><button class="chip" data-pm="'+next+'">'+esc(monthLabel(next))+' ›</button><button class="chip" data-pm="'+TODAY.slice(0,7)+'">Today</button></div>'+
-    '<div class="pgrid">'+['Mon','Tue','Wed','Thu','Fri','Sat','Sun'].map(function(n){return '<div class="phd">'+n+'</div>';}).join('')+cells+'</div>'+
-    '<p class="note" style="margin-top:8px"><span class="dot" style="background:#E8A33D"></span> tax dates &nbsp; <span class="dot" style="background:#2FBF8F"></span> invoices due from clients</p>'+
+    '<p class="note">Bills, tax dates and project days are on the <a data-view="cal" tabindex="0">Calendar</a>.</p>'+
     '<div class="grid g2" style="margin-top:18px"><div class="sec" style="margin-top:0"><h3>Monthly bills</h3><div class="tablewrap"><table class="etbl"><thead><tr><th>Bill</th><th class="r">Usual amount</th><th class="r">Day</th><th></th></tr></thead><tbody>'+(rec||'<tr><td colspan="4" class="empty">None yet.</td></tr>')+'</tbody></table></div>'+(admin?'<div class="btnrow" style="margin-top:10px"><button class="btn" data-act="rec-new">Add a monthly bill</button></div>':'')+'</div>'+
     '<div class="sec" style="margin-top:0"><h3>Costs not paid yet · LKR '+fmt(uTot)+'</h3><div class="tablewrap"><table class="etbl"><thead><tr><th>Date</th><th>Paid to</th><th class="r">Owed</th></tr></thead><tbody>'+(urows||'<tr><td colspan="3" class="empty">Everything is paid.</td></tr>')+'</tbody></table></div></div></div>';
 }
@@ -1872,6 +1965,10 @@ document.addEventListener('click',function(e){
   var vd=t.closest('[data-vendor]'); if(vd){state.vsel=vd.getAttribute('data-vendor');go('vendors');return;}
   var at=t.closest('[data-atab]'); if(at){state.atab=at.getAttribute('data-atab');go('acct');return;}
   var pm=t.closest('[data-pm]'); if(pm){state.pmonth=pm.getAttribute('data-pm');go('pay');return;}
+  var cm=t.closest('[data-cm]'); if(cm){state.cmonth=cm.getAttribute('data-cm');state.calSel=null;go('cal');return;}
+  var cp=t.closest('[data-calpid]'); if(cp){var k={pid:cp.getAttribute('data-calpid'),date:cp.getAttribute('data-caldate')};state.calSel=(state.calSel&&state.calSel.pid===k.pid&&state.calSel.date===k.date)?null:k;go('cal');var pn=document.querySelector('.cal-panel');if(pn)pn.scrollIntoView({block:'nearest',behavior:'smooth'});return;}
+  var co=t.closest('[data-calopen]'); if(co){openProject(co.getAttribute('data-calopen'));return;}
+  var cb=t.closest('[data-calbill]'); if(cb){var b=cb.getAttribute('data-calbill').split('|');call('saveRecurring',[{name:b[0],amount:b[1],day:b[2],colour:'#8E949E'},''],function(){go('cal');},'Added to the calendar');return;}
   var qfc=t.closest('[data-qf]'); if(qfc){state.qf=qfc.getAttribute('data-qf');go('entries');return;}
   var et=t.closest('[data-etab]'); if(et){state.etab=et.getAttribute('data-etab');go('entries');return;}
   var ef=t.closest('[data-ef]'); if(ef){state.ef=ef.getAttribute('data-ef');state.eshow=150;go('entries');return;}
